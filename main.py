@@ -19,7 +19,7 @@ def parse_file(filename):
     armoise_current_filename = filename
     
     # Parse the input
-    result = parser.parse(data, lexer=lexer)
+    result = parser.parse(data, lexer=lexer, tracking=True)
     
     if armoise_syntax_tree:
         return armoise_syntax_tree

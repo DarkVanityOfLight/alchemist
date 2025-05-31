@@ -67,6 +67,7 @@ def t_NEWLINE(t):
     r'\n'
     global armoise_current_line
     armoise_current_line += 1
+    t.lexer.lineno += len(t.value)
 
 def t_COMMENT(t):
     r'/\*(.|\n)*?\*/'
