@@ -1,21 +1,46 @@
 from abc import abstractmethod, ABC
-from typing import Tuple, Literal, List
+from typing import Tuple, Literal, List, Optional
 
 from common import Variable, SetType
 from arm_ast import NodeType
 
 
-type SymbolicalSet = BaseSet | TupleDomain | FiniteSet | LinearSet | SetOperation
+type SymbolicalSet = TupleDomain | FiniteSet | SetOperation | ArithmeticExpression
+type Predicate = SetExpression
 
 class SetExpression(ABC):
     @abstractmethod
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         pass
 
+    @property
+    @abstractmethod
+    def dim(self) -> int:
+        pass
+
+class ArithmeticExpression(SetExpression):
+    """Represents scalar multiplication of a set (e.g., 2 * G0)"""
+    def __init__(self,set_expr: SetExpression):
+        self.set_expr = set_expr
+    
+    @property
+    def dim(self) -> int:
+        return self.set_expr.dim
+    
+    def realize_constraints(self, args: Tuple[str, ...]) -> str:
+        return NotImplemented
+    
+    def __repr__(self):
+        return NotImplemented
+
 class TupleDomain(SetExpression):
     """Represents a product type domain like (int, int, nat)"""
     def __init__(self, types: Tuple[SetType, ...]) -> None:
         self.types = types
+
+    @property
+    def dim(self) -> int:
+        return len(self.types)
 
     def __len__(self):
         return len(self.types)
@@ -47,21 +72,28 @@ class TupleDomain(SetExpression):
 class BaseSet(SetExpression):
     def __init__(self, set_type: SetType):
         self.set_type = set_type
+
+    @property
+    def dim(self) -> int:
+        """Asking a base set for a dimension is not intended"""
+        return -1
     
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
-        if len(args) != 1:
-            raise ValueError(f"Base set {self.set_type} requires exactly 1 argument")
-        
+        """Impose the base set constraint on all args"""
+        if not args:
+            raise ValueError("No arguments provided for base set constraint")
+
         if self.set_type == "NATURALS":
-            return f"(>= {args[0]} 0)"
+            return "(and " + " ".join(f"(>= {arg} 0)" for arg in args) + ")"
         elif self.set_type == "POSITIVES":
-            return f"(> {args[0]} 0)"
+            return "(and " + " ".join(f"(> {arg} 0)" for arg in args) + ")"
         elif self.set_type == "INTEGERS":
             return "true"
         elif self.set_type == "REALS":
-            return "true"  # Placeholder for future real support
+            return "true"  # Placeholder
         elif self.set_type == "EMPTY":
             return "false"
+        
         return "true"
 
     def __repr__(self):
@@ -70,46 +102,27 @@ class BaseSet(SetExpression):
 class FiniteSet(SetExpression):
     def __init__(self, elements: List[Tuple[int, ...]]):
         self.elements = elements
-        self.dim = len(elements[0]) if elements else 0
+        self._dim = len(elements[0]) if elements else 0
+
+    @property
+    def dim(self) -> int:
+        return self._dim
 
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
-        if len(args) != self.dim:
-            raise ValueError("Dimension mismatch in FiniteSet")
-        or_conditions = []
-        for element in self.elements:
-            eq_conditions = [f"(= {args[i]} {val})" for i, val in enumerate(element)]
-            and_cond = "(and " + " ".join(eq_conditions) + ")" if eq_conditions else "true"
-            or_conditions.append(and_cond)
-        return "(or " + " ".join(or_conditions) + ")" if or_conditions else "false"
-
-class LinearSet(SetExpression):
-    def __init__(self, basis: List[Tuple[int, ...]]):
-        self.basis = basis
-        self.dim = len(basis[0]) if basis else 0
-        
-    def realize_constraints(self, args: Tuple[str, ...]) -> str:
-        if self.dim != len(args):
-            raise ValueError("Dimension mismatch in LinearSet")
-        
-        eqns = []
-        for i in range(self.dim):
-            terms = []
-            for j, vec in enumerate(self.basis):
-                terms.append(f"(* a_{j} {vec[i]})")
-            expr = "(+ " + " ".join(terms) + ")" if terms else "0"
-            eqns.append(f"(= {args[i]} {expr})")
-        
-        coeff_vars = [f"a_{i}" for i in range(len(self.basis))]
-        quantifier = f"(exists ({' '.join([f'({a} Int)' for a in coeff_vars])})"
-        return f"{quantifier} (and {' '.join(eqns)}))"
-
-    def __repr__(self):
-        return f"LinearSet(dim={self.dim}, basis_size={len(self.basis)})"
+        return NotImplemented
     
 class SetOperation(SetExpression):
+    """
+    A set operation is not a real set,
+    but rather represents the set we get by applying the operation
+    """
     def __init__(self, op: NodeType, sets: List[SetExpression]):
         self.op = op
         self.sets = sets
+
+    @property
+    def dim(self) -> int:
+        return self.sets[0].dim
         
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         set_strs = [s.realize_constraints(args) for s in self.sets]
@@ -139,7 +152,6 @@ class SetOperation(SetExpression):
     def __repr__(self):
         return f"SetOperation({self.op}, {len(self.sets)} sets)"
 
-
 from guards import Guard
 
 class SetComprehension(SetExpression):
@@ -148,6 +160,10 @@ class SetComprehension(SetExpression):
         self.domain = domain
         self.guard = guard
 
+    @property
+    def dim(self) -> int:
+        return len(self.members)
+
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         domain_cond = self.domain.realize_constraints(args)
         guard_cond = self.guard.realize_constraints(args)
@@ -155,5 +171,3 @@ class SetComprehension(SetExpression):
 
     def __repr__(self):
         return f"SetPredicate({self.members} IN {self.domain} WHERE {self.guard})"
-
-type Predicate = SetExpression
