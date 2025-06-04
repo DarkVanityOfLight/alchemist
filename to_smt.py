@@ -248,14 +248,14 @@ def _process_predicate_context(node: ASTNode, scopes: ScopeHandler) -> None:
 
 def _process_predicate(node: ASTNode, scopes: ScopeHandler) -> Predicate:
     assert_node_type(node, NodeType.PREDICATE)
-    assert node.child and node.child.next
+    assert node.child
 
     has_context = node.child.type == NodeType.PREDICATE_CONTEXT
     if has_context:
         scopes.enter_scope()
         _process_predicate_context(node.child, scopes)
 
-    content_node = node.child.next if has_context else node.child
+    content_node = cast(ASTNode, node.child.next if has_context else node.child)
     predicate = _process_set_expression(content_node, scopes)
 
     if has_context:
