@@ -1,9 +1,13 @@
+from __future__ import annotations
 from abc import abstractmethod, ABC
-from typing import Tuple, Literal, List, Optional
+from typing import Tuple, List
 
 from common import Variable, SetType
 from arm_ast import NodeType
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from guards import Guard
 
 type SymbolicalSet = TupleDomain | FiniteSet | SetOperation | ArithmeticExpression
 type Predicate = SetExpression
@@ -75,7 +79,7 @@ class BaseSet(SetExpression):
 
     @property
     def dim(self) -> int:
-        """Asking a base set for a dimension is not intended"""
+        """Asking a base set for a dimension is not intended, since it can take any dimension"""
         return -1
     
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
@@ -151,8 +155,6 @@ class SetOperation(SetExpression):
 
     def __repr__(self):
         return f"SetOperation({self.op}, {len(self.sets)} sets)"
-
-from guards import Guard
 
 class SetComprehension(SetExpression):
     def __init__(self, members: Tuple[Variable, ...], domain: SetExpression, guard: Guard):

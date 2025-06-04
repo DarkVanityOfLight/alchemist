@@ -1,11 +1,18 @@
 from __future__ import annotations
+from string import Template
+from types import NotImplementedType
 from typing import Tuple, cast, List
-from arm_ast import ASTNode, NodeType
+from arm_ast import BASE_SET_TYPES, ASTNode, NodeType
 from scope_handler import ScopeHandler
 
-from common import Variable, SetType
-from guards import Guard, SimpleGuard, SetGuard
+from common import Variable, SetType, get_fresh_variable, node_type_to_set_type
+from guards import SMTGuard, SimpleGuard, SetGuard
 from sets import BaseSet, SetExpression, SetOperation, TupleDomain, FiniteSet, SetComprehension, Predicate, SetType
+
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from guards import Guard
 
 def assert_node_type(node: ASTNode, expected_type):
     if node.type != expected_type:
@@ -15,9 +22,14 @@ def assert_node_type(node: ASTNode, expected_type):
         )
 
 def _process_guard(node: ASTNode, variables: Tuple[Variable, ...], scopes: ScopeHandler) -> Guard:
+    assert node is not None
+    assert node.child is not None
+    assert node.child.next is not None
+
     # Set guard
     if node.type == NodeType.IN:
         arguments = node.child
+        assert arguments is not None
         assert_node_type(arguments, NodeType.VECTOR)
         set_expr = _process_set_expression(node.child.next, scopes)
         return SetGuard(variables, set_expr)
@@ -45,7 +57,7 @@ def _process_set_expression(node: ASTNode, scopes: ScopeHandler) -> SetExpressio
         NodeType.NATURALS, NodeType.INTEGERS,
         NodeType.POSITIVES, NodeType.REALS, NodeType.EMPTY
     ]:
-        return BaseSet(node.type)
+        return BaseSet(node_type_to_set_type(node.type))
 
     # ─── 2) Set operations ─────────────────────────────────────────────────────
     if node.type in [
@@ -76,7 +88,68 @@ def _process_set_expression(node: ASTNode, scopes: ScopeHandler) -> SetExpressio
 
     # ─── 6) Multiplication (MUL) ─────────────────────────────────────────────────
     if node.type == NodeType.MUL:
-        pass #TODO: Not Implemented
+        a, b = node.children
+        match (a.type, b.type):
+            # Set * Vector => Hadamard
+            case (NodeType.IDENTIFIER, NodeType.PAREN) | (NodeType.PAREN, NodeType.IDENTIFIER):
+                set_node = a if a.type is NodeType.IDENTIFIER else b
+                vec_node = b if a.type is NodeType.IDENTIFIER else a
+
+                pass
+
+            # BaseSet * Vector => SetComprehension
+            case (t, NodeType.PAREN) if t in BASE_SET_TYPES:
+                base_node = a
+                vec_node = b # Vector of integers
+
+                assert all(child.type == NodeType.INTEGER for child in vec_node.children)
+
+                # Make variables from vector
+                existential_scalar = get_fresh_variable("scalar")
+
+                # Create a argument vector of these dimensions
+                argument_vector = tuple([Variable(get_fresh_variable("argument"), None) for _ in vec_node])
+                guards = [f"(= (* {existential_scalar} {coeff}) ${argument.name})"
+                    for coeff, argument in zip(vec_node, argument_vector)]
+
+                guard_expr = f"(and {' '.join(guards)})"
+                smt_guard = ""
+                match base_node.type: 
+                    case NodeType.INTEGERS: 
+                        smt_guard = f"(exists (Int {existential_scalar}) {guard_expr})"
+                    case NodeType.NATURALS:
+                        smt_guard = f"(exists (Int {existential_scalar}) (and {guard_expr} (>= {existential_scalar} 0))"
+                    case NodeType.POSITIVES:
+                        smt_guard = f"(exists (Int {existential_scalar}) (and {guard_expr} (> {existential_scalar} 0))"
+                    case NodeType.REALS:
+                        smt_guard = f"(exists (Real {existential_scalar}) (and {guard_expr})"
+                    case _:
+                        raise ValueError(f"No domain of type: {base_node.type}")
+
+                template = Template(smt_guard)
+                guard = SMTGuard(argument_vector, template)
+                print(SetComprehension(argument_vector, BaseSet(node_type_to_set_type(base_node.type)), guard))
+
+
+                return SetComprehension(argument_vector,
+                                        BaseSet(node_type_to_set_type(base_node.type)),
+                                        guard)
+
+            case (NodeType.PAREN, t) if t in BASE_SET_TYPES:
+                base_node = b
+                vec_node = a
+
+                pass
+
+            # Set * Scalar => Arithmetic
+            case (NodeType.IDENTIFIER, NodeType.INTEGER) | (NodeType.INTEGER, NodeType.IDENTIFIER):
+                set_node = a if a.type is NodeType.IDENTIFIER else b
+                scalar_node = b if a.type is NodeType.IDENTIFIER else a
+
+                pass
+
+            case _:
+                raise NotImplementedError(f"Unhandled MUL case: {a.type} * {b.type}")
 
     # ─── 7) Sum (PLUS) ──────────────────────────────────────────────────────────
     if node.type == NodeType.PLUS:
