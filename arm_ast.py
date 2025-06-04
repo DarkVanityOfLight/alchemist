@@ -59,6 +59,15 @@ BASE_SET_TYPES = {
     NodeType.EMPTY,
 }
 
+ARITHMETIC_OPERATIONS = {
+    NodeType.PLUS,
+    NodeType.MINUS, 
+    NodeType.MUL,
+    NodeType.DIV,
+    NodeType.MOD,
+    NodeType.POWER 
+}
+
 class ValueType:
     EMPTY = "CCL_PARSE_TREE_EMPTY"
     INT = "CCL_PARSE_TREE_INT"

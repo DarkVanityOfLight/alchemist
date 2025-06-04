@@ -2,7 +2,7 @@ from __future__ import annotations
 from string import Template
 from types import NotImplementedType
 from typing import Tuple, cast, List
-from arm_ast import BASE_SET_TYPES, ASTNode, NodeType
+from arm_ast import ARITHMETIC_OPERATIONS, BASE_SET_TYPES, ASTNode, NodeType
 from scope_handler import ScopeHandler
 
 from common import Variable, SetType, get_fresh_variable, node_type_to_set_type
@@ -40,16 +40,6 @@ def _process_guard(node: ASTNode, variables: Tuple[Variable, ...], scopes: Scope
 def _process_members(node: ASTNode) -> Tuple[str, ...]:
     assert_node_type(node, NodeType.VECTOR)
     return tuple(child.value for child in node)
-
-def _is_integer_literal(node: ASTNode) -> bool:
-    """Check if node represents a single integer literal (not the INTEGERS set)"""
-    return node.type == NodeType.INTEGER
-
-def _get_integer_value(node: ASTNode) -> int:
-    """Get integer value from a literal node"""
-    if node.type == NodeType.INTEGER:
-        return int(node.value)
-    raise ValueError(f"Expected integer literal, got {node.type}")
 
 def _process_set_expression(node: ASTNode, scopes: ScopeHandler) -> SetExpression:
     # ─── 1) Base sets ───────────────────────────────────────────────────────────
@@ -166,8 +156,13 @@ def _process_set_expression(node: ASTNode, scopes: ScopeHandler) -> SetExpressio
 def _process_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> SetComprehension:
     assert_node_type(node, NodeType.SET)
     members_in_domain = node.child
+
+    assert members_in_domain is not None
     assert_node_type(members_in_domain, NodeType.IN)
-    
+    assert members_in_domain.child is not None
+    assert members_in_domain.child.next is not None
+    assert members_in_domain.next is not None
+
     member_names = _process_members(members_in_domain.child)
     domain_expr = _process_set_expression(members_in_domain.child.next, scopes)
     
@@ -186,6 +181,8 @@ def _process_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> SetCompre
 
 def _process_definition(node: ASTNode, scopes: ScopeHandler):
     """Process the definition into scope"""
+    assert node.child is not None
+    assert node.child.next is not None
     assert_node_type(node, NodeType.DEFINITION)
     
     ident = node.child.value
@@ -217,6 +214,8 @@ def process_typed_tuple(node: ASTNode) -> TupleDomain:
             
 def _process_predicate(node: ASTNode, scopes: ScopeHandler) -> Predicate:
     assert_node_type(node, NodeType.PREDICATE)
+    assert node.child is not None
+    assert node.child.next is not None
 
     has_context = node.child.type == NodeType.PREDICATE_CONTEXT
 
@@ -233,6 +232,7 @@ def _process_predicate(node: ASTNode, scopes: ScopeHandler) -> Predicate:
     return predicate
 
 def convert(ast: ASTNode) -> SetComprehension:
+    assert ast.child is not None
     scopes = ScopeHandler()
 
     assert_node_type(ast, NodeType.PREDICATE)
