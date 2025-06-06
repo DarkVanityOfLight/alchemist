@@ -1,6 +1,6 @@
 from __future__ import annotations
 from abc import abstractmethod, ABC
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 from common import UnsupportedOperationError, Variable, BaseSetType
 from arm_ast import NodeType
@@ -14,7 +14,7 @@ type Predicate = SetExpression
 
 class SetExpression(ABC):
     @abstractmethod
-    def realize_constraints(self, args: Tuple[str, ...]) -> str:
+    def realize_constraints(self, args: Tuple[str, ...]) -> Optional[str]:
         pass
 
     @property
@@ -53,19 +53,28 @@ class TupleDomain(SetExpression):
     def __repr__(self):
         return f"TupleDomain({', '.join(t.name for t in self.types)})"
     
-    def realize_constraints(self, args: Tuple[str, ...]) -> str:
+    def realize_constraints(self, args: Tuple[str, ...]) -> Optional[str]:
         if len(self.types) != len(args):
             raise ValueError("Tuple dimension mismatch")
-        
+
         conditions = []
         for i, typ in enumerate(self.types):
-            if typ == "Nat":
-                conditions.append(f"(>= {args[i]} 0)")
-            elif typ == "Real":
-                raise NotImplementedError("Real numbers not supported")
-        if conditions:
-            return "(and " + " ".join(conditions) + ")"
-        return "true"
+            match typ:
+                case BaseSetType.REALS:
+                    raise NotImplementedError("Real numbers not supported")
+                case BaseSetType.INTEGERS:
+                    conditions.append(None)
+                case BaseSetType.NATURALS:
+                    conditions.append(f"(>= {args[i]} 0)")
+                case BaseSetType.POSITIVES:
+                    conditions.append(f"(> {args[i]} 0)")
+
+        filtered = [c for c in conditions if c is not None]
+        if not filtered:
+            return None
+        if len(filtered) == 1:
+            return filtered[0]
+        return f"(and {' '.join(filtered)})"
 
 
 class BaseSet(SetExpression):
@@ -84,7 +93,7 @@ class BaseSet(SetExpression):
         """Asking a base set for a dimension is not intended, since it can take any dimension"""
         raise UnsupportedOperationError()
     
-    def realize_constraints(self, args: Tuple[str, ...]) -> str:
+    def realize_constraints(self, args: Tuple[str, ...]) -> Optional[str]:
         """Impose the base set constraint on all args"""
         if not args:
             raise ValueError("No arguments provided for base set constraint")
@@ -93,14 +102,10 @@ class BaseSet(SetExpression):
             return "(and " + " ".join(f"(>= {arg} 0)" for arg in args) + ")"
         elif self.set_type == "POSITIVES":
             return "(and " + " ".join(f"(> {arg} 0)" for arg in args) + ")"
-        elif self.set_type == "INTEGERS":
-            return "true"
-        elif self.set_type == "REALS":
-            return "true"  # Placeholder
         elif self.set_type == "EMPTY":
             return "false"
-        
-        return "true"
+        else:
+            return None
 
     def __repr__(self):
         return f"BaseSet({self.set_type})"
@@ -143,7 +148,13 @@ class SetOperation(SetExpression):
         return tuple([f"argument_{i}" for i in range(self.dim)])
         
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
-        set_strs = [s.realize_constraints(args) for s in self.sets]
+        set_strs = []
+        for s in self.sets:
+            val = s.realize_constraints(args)
+            if val is not None:
+                set_strs.append(val)
+
+        assert len(set_strs) >= 2
         
         if self.op == NodeType.UNION:
             return "(or " + " ".join(set_strs) + ")"
@@ -184,10 +195,17 @@ class SetComprehension(SetExpression):
     def arguments(self) -> Tuple[str, ...]:
         return tuple(v.name for v in self.members)
 
-    def realize_constraints(self, args: Tuple[str, ...]) -> str:
-        domain_cond = self.domain.realize_constraints(args)
-        guard_cond = self.guard.realize_constraints(args)
-        return f"(and {domain_cond} {guard_cond})"
+    def realize_constraints(self, args: Tuple[str, ...]) -> Optional[str]:
+        guard_constraint = self.guard.realize_constraints(args)
+        domain_constraint = self.domain.realize_constraints(args)
+
+        if guard_constraint and domain_constraint:
+            return f"(and {guard_constraint} {domain_constraint})"
+        if guard_constraint:
+            return guard_constraint
+        if domain_constraint:
+            return domain_constraint
+        return None
 
     def __repr__(self):
         return f"SetComprehension({self.members} IN {self.domain} WHERE {self.guard})"
@@ -207,3 +225,6 @@ class ConstantVector(SetExpression):
 
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         raise UnsupportedOperationError()
+
+    def __repr__(self) -> str:
+        return f"Vector({','.join(str(c) for c in self.components)})"
