@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Tuple, cast
 from arm_ast import ARITHMETIC_OPERATIONS, BASE_SET_TYPES, ASTNode, NodeType, BaseSetType 
 from scope_handler import ScopeHandler
 
-from common import Variable, get_fresh_variable
+from common import Variable, fresh_variable, Namespace, _smt_sort
 from guards import SMTGuard, SimpleGuard, SetGuard
 from sets import (
     BaseSet,
@@ -125,7 +125,8 @@ def _process_arithmetic(node: ASTNode, scopes: ScopeHandler) -> SetExpression:
 def _process_mul(node: ASTNode, scopes: ScopeHandler) -> SetExpression:
     left_expr  = _process_set_expression(node.children[0], scopes)
     right_expr = _process_set_expression(node.children[1], scopes)
-    return _combine_mul(left_expr, right_expr, scopes)
+    comb = _combine_mul(left_expr, right_expr, scopes)
+    return comb
 
 def _combine_mul(left: SetExpression, right: SetExpression, scopes: ScopeHandler) -> SetExpression:
     # BaseSet × Vector
@@ -139,29 +140,38 @@ def _combine_mul(left: SetExpression, right: SetExpression, scopes: ScopeHandler
         raise NotImplementedError(f"Vector multiplication not fully implemented at line")
 
     # BaseSet × Arithmetic (not implemented)
-    if isinstance(left, BaseSet) or isinstance(right, BaseSet):
-        raise NotImplementedError(f"Base set multiplication not fully implemented")
+    if isinstance(left, BaseSet) and isinstance(right, SetComprehension):
+        return _handle_base_mul_arithmetic(left, right)
+
+    if isinstance(right, BaseSet) and isinstance(left, SetComprehension):
+        return _handle_base_mul_arithmetic(right, left)
 
     raise NotImplementedError(f"Unhandled MUL types: {type(left)} * {type(right)}")
 
 def _handle_base_mul_vector(base_set: BaseSet, vector: ConstantVector) -> SetComprehension:
-    existential_scalar = get_fresh_variable("scalar")
-    argument_vars = tuple(Variable(get_fresh_variable("arg"), base_set.set_type) for _ in vector.components)
+    existential_scalar = fresh_variable(Namespace.SCALAR)
+    argument_names = [fresh_variable(Namespace.ARGUMENT) for _ in vector.components]
+    argument_vars = tuple(Variable(name, base_set.set_type) for name in argument_names)
     
+    # Create equality constraints using the argument names directly
     guard_clauses = []
     for i, coeff in enumerate(vector.components):
-        arg_var = argument_vars[i]
-        guard_clauses.append(f"(= (* {existential_scalar} {coeff}) ${arg_var.name})")
+        arg_name = argument_names[i]
+        guard_clauses.append(f"(= (* {existential_scalar} {coeff}) ${arg_name})")
     
     guard_body = "(and " + " ".join(guard_clauses) + ")"
     smt_guard = _build_smt_exists(base_set.set_type, existential_scalar, guard_body)
-    smt_template = Template(smt_guard)
-    guard = SMTGuard(argument_vars, smt_template)
+    
+    # No Template needed since we're using concrete names
+    guard = SMTGuard(argument_vars, Template(smt_guard))
     
     domain_types = tuple(base_set.set_type for _ in vector.components)
     domain = TupleDomain(domain_types)
     
     return SetComprehension(argument_vars, domain, guard)
+
+def _handle_base_mul_arithmetic(base: BaseSet, arithmetic: SetComprehension) -> SetComprehension:
+    raise NotImplementedError()
 
 
 # ─── Addition Cases ─────────────────────────────────────────────────────────────
@@ -188,11 +198,15 @@ def _combine_plus(left: SetExpression, right: SetExpression, scopes: ScopeHandle
     if isinstance(left, BaseSet) or isinstance(right, BaseSet):
         raise NotImplementedError(f"Base set addition not fully implemented")
 
+    # Arithmetic + Arithmetic
+    if isinstance(left, SetComprehension) and isinstance(right, SetComprehension):
+        return _handle_arithmetic_plus_arithmetic(left, right)
+
     raise NotImplementedError(f"Unhandled PLUS types: {type(left)} + {type(right)}")
 
 def _handle_base_plus_vector(base_set: BaseSet, vector: ConstantVector) -> SetComprehension:
-    existential_scalar = get_fresh_variable("scalar")
-    argument_vars = tuple(Variable(get_fresh_variable("arg"), base_set.set_type) for _ in vector.components)
+    existential_scalar = fresh_variable(Namespace.SCALAR)
+    argument_vars = tuple(Variable(fresh_variable(Namespace.ARGUMENT), base_set.set_type) for _ in vector.components)
     
     guard_clauses = []
     for i, coeff in enumerate(vector.components):
@@ -213,10 +227,10 @@ def _handle_vector_plus_arithmetic(vector: ConstantVector, arithmetic: SetCompre
     assert vector.dim == arithmetic.dim
 
     # Create new argument vars representing the result of the vector + arithmetic expression
-    arguments = [Variable(get_fresh_variable("arg"), arg.domain) for arg in arithmetic.members]
+    arguments = [Variable(fresh_variable(Namespace.ARGUMENT), arg.domain) for arg in arithmetic.members]
 
     # Create fresh bound vars that will satisfy the original arithmetic constraint
-    bound_arguments = [Variable(get_fresh_variable("bound"), arg.domain) for arg in arithmetic.members]
+    bound_arguments = [Variable(fresh_variable(Namespace.BOUND_ARGUMENT), arg.domain) for arg in arithmetic.members]
 
     # Realize original constraints using the fresh bound vars
     constraint = arithmetic.realize_constraints(tuple(var.name for var in bound_arguments))
@@ -228,15 +242,65 @@ def _handle_vector_plus_arithmetic(vector: ConstantVector, arithmetic: SetCompre
     ]
 
     # Combine constraints into a single guard
-    full_constraint = "(and " + " ".join([constraint] + offset_constraints) + ")"
+    parts = [constraint] + offset_constraints
+    parts_filtered = [p for p in parts if p is not None]
+    full_constraint = "(and " + " ".join(parts_filtered) + ")"
 
     # Wrap in existential quantifier over bound variables
-    bound_decls = " ".join(f"({arg.domain} {var.name})" for var, arg in zip(bound_arguments, arithmetic.members))
+    bound_decls = " ".join(f"({_smt_sort(arg.domain)} {var.name})" for var, arg in zip(bound_arguments, arithmetic.members))
     quantified = f"(exists ({bound_decls}) {full_constraint})"
 
     guard = SMTGuard(tuple(arguments), Template(quantified))
     domain = TupleDomain(tuple(arg.domain for arg in arguments))
     
+    return SetComprehension(tuple(arguments), domain, guard)
+
+def _handle_arithmetic_plus_arithmetic(
+    left: SetComprehension, right: SetComprehension
+) -> SetComprehension:
+    assert left.dim == right.dim
+
+    # Create fresh result‐arguments
+    arguments = [
+        Variable(fresh_variable(Namespace.ARGUMENT), var.domain)
+        for var in left.members
+    ]
+
+    # Create fresh bound vars for left and right
+    bound_args1 = [
+        Variable(fresh_variable(Namespace.BOUND_ARGUMENT), var.domain)
+        for var in left.members
+    ]
+    bound_args2 = [
+        Variable(fresh_variable(Namespace.BOUND_ARGUMENT), var.domain)
+        for var in right.members
+    ]
+
+    # Realize each set‐comprehension’s own constraints over its bound vars
+    left_constraints = left.realize_constraints(tuple(arg.name for arg in bound_args1))
+    right_constraints = right.realize_constraints(tuple(arg.name for arg in bound_args2))
+
+    # Build sum‐constraints: arg_i = (+ bound1_i bound2_i)
+    sum_constraints = [
+        f"(= ${arguments[i].name} "
+        f"(+ {bound_args1[i].name} {bound_args2[i].name}))"
+        for i in range(left.dim)
+    ]
+
+    # Combine all constraints under one conjunction
+    constraints = [left_constraints, right_constraints] + sum_constraints
+    constraints_filtered = [c for c in constraints if c is not None]
+
+    all_constraints = "(and " + " ".join(constraints_filtered) + ")"
+
+    # Quantify existentially over both bound‐var lists
+    bound_decls1 = " ".join(f"({_smt_sort(var.domain)} {var.name})" for var in bound_args1)
+    bound_decls2 = " ".join(f"({_smt_sort(var.domain)} {var.name})" for var in bound_args2)
+    quantified = f"(exists ({bound_decls1} {bound_decls2}) {all_constraints})"
+
+    guard = SMTGuard(tuple(arguments), Template(quantified))
+    domain = TupleDomain(tuple(arg.domain for arg in arguments))
+
     return SetComprehension(tuple(arguments), domain, guard)
 
 # ─── SMT Helpers ────────────────────────────────────────────────────────────────
