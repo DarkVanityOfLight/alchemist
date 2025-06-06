@@ -126,60 +126,60 @@ class FiniteSet(SetExpression):
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         raise NotImplementedError()
     
-class SetOperation(SetExpression):
-    """
-    A set operation is not a real set,
-    but rather represents the set we get by applying the operation
-    """
-    def __init__(self, op: NodeType, sets: List[SetExpression]):
-        dim = sets[0].dim
-        if any(s.dim != dim for s in sets):
-            raise ValueError("All sets must have the same dimension")
-
-        self.op = op
-        self.sets = sets
-
-    @property
-    def dim(self) -> int:
-        return self.sets[0].dim
-
-    @property
-    def arguments(self) -> Tuple[str, ...]:
-        return tuple([f"argument_{i}" for i in range(self.dim)])
-        
-    def realize_constraints(self, args: Tuple[str, ...]) -> str:
-        set_strs = []
-        for s in self.sets:
-            val = s.realize_constraints(args)
-            if val is not None:
-                set_strs.append(val)
-
-        assert len(set_strs) >= 2
-        
-        if self.op == NodeType.UNION:
-            return "(or " + " ".join(set_strs) + ")"
-        elif self.op == NodeType.INTERSECTION:
-            return "(and " + " ".join(set_strs) + ")"
-        elif self.op == NodeType.DIFFERENCE:
-            if len(self.sets) != 2:
-                raise ValueError("Difference requires exactly two sets")
-            return f"(and {set_strs[0]} (not {set_strs[1]}))"
-        elif self.op == NodeType.XOR:
-            if len(self.sets) != 2:
-                raise ValueError("XOR requires exactly two sets")
-            return f"(xor {set_strs[0]} {set_strs[1]})"
-        elif self.op == NodeType.COMPLEMENT:
-            if len(self.sets) != 1:
-                raise ValueError("Complement requires exactly one set")
-            return f"(not {set_strs[0]})"
-        elif self.op == NodeType.CARTESIAN_PRODUCT:
-            # Requires specialized handling
-            raise NotImplementedError("Cartesian product not implemented")
-        else:
-            raise NotImplementedError(f"Unsupported set operation: {self.op}")
-
-    def __repr__(self):
-        return f"SetOperation({self.op}, {len(self.sets)} sets)"
+# class SetOperation(SetExpression):
+#     """
+#     A set operation is not a real set,
+#     but rather represents the set we get by applying the operation
+#     """
+#     def __init__(self, op: NodeType, sets: List[SetExpression]):
+#         dim = sets[0].dim
+#         if any(s.dim != dim for s in sets):
+#             raise ValueError("All sets must have the same dimension")
+#
+#         self.op = op
+#         self.sets = sets
+#
+#     @property
+#     def dim(self) -> int:
+#         return self.sets[0].dim
+#
+#     @property
+#     def arguments(self) -> Tuple[str, ...]:
+#         return tuple([f"argument_{i}" for i in range(self.dim)])
+#         
+#     def realize_constraints(self, args: Tuple[str, ...]) -> str:
+#         set_strs = []
+#         for s in self.sets:
+#             val = s.realize_constraints(args)
+#             if val is not None:
+#                 set_strs.append(val)
+#
+#         assert len(set_strs) >= 2
+#         
+#         if self.op == NodeType.UNION:
+#             return "(or " + " ".join(set_strs) + ")"
+#         elif self.op == NodeType.INTERSECTION:
+#             return "(and " + " ".join(set_strs) + ")"
+#         elif self.op == NodeType.DIFFERENCE:
+#             if len(self.sets) != 2:
+#                 raise ValueError("Difference requires exactly two sets")
+#             return f"(and {set_strs[0]} (not {set_strs[1]}))"
+#         elif self.op == NodeType.XOR:
+#             if len(self.sets) != 2:
+#                 raise ValueError("XOR requires exactly two sets")
+#             return f"(xor {set_strs[0]} {set_strs[1]})"
+#         elif self.op == NodeType.COMPLEMENT:
+#             if len(self.sets) != 1:
+#                 raise ValueError("Complement requires exactly one set")
+#             return f"(not {set_strs[0]})"
+#         elif self.op == NodeType.CARTESIAN_PRODUCT:
+#             # Requires specialized handling
+#             raise NotImplementedError("Cartesian product not implemented")
+#         else:
+#             raise NotImplementedError(f"Unsupported set operation: {self.op}")
+#
+#     def __repr__(self):
+#         return f"SetOperation({self.op}, {len(self.sets)} sets)"
 
 class SetComprehension(SetExpression):
     def __init__(self, members: Tuple[Variable, ...], domain: SetExpression, guard: Guard):
@@ -245,4 +245,4 @@ class ConstantScalar(SetExpression):
         raise UnsupportedOperationError()
 
     def __repr__(self) -> str:
-        return f"Scalar({self.scalar})"
+        return f"Scalar({self.value})"

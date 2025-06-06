@@ -2,7 +2,7 @@ from __future__ import annotations
 from string import Template
 from typing import TYPE_CHECKING, Tuple, cast
 
-from arm_ast import ARITHMETIC_OPERATIONS, BASE_SET_TYPES, ASTNode, NodeType, BaseSetType 
+from arm_ast import ARITHMETIC_OPERATIONS, BASE_SET_TYPES, SET_OPERATION_TYPES, ASTNode, NodeType, BaseSetType, SetOperationType
 from scope_handler import ScopeHandler
 
 from common import Variable, fresh_variable, Namespace, _smt_sort
@@ -11,7 +11,6 @@ from sets import (
     BaseSet,
     ConstantScalar,
     SetExpression,
-    SetOperation,
     TupleDomain,
     FiniteSet,
     SetComprehension,
@@ -54,9 +53,9 @@ def _process_set_expression(node: ASTNode, scopes: ScopeHandler) -> SetExpressio
     if node.type in BASE_SET_TYPES:
         return BaseSet(BaseSetType(node.type))
 
-    if _is_set_operation(node):
+    if node.type in SET_OPERATION_TYPES:
         operands = [_process_set_expression(child, scopes) for child in node]
-        return SetOperation(node.type, operands)
+        return _handle_set_operation(SetOperationType(node.type), tuple(operands))
 
     if node.type == NodeType.IDENTIFIER:
         return scopes[node.value]
@@ -91,15 +90,55 @@ def _process_set_expression(node: ASTNode, scopes: ScopeHandler) -> SetExpressio
     raise NotImplementedError(f"Unsupported set expression type: {node.type} at line {node.line}")
 
 
-def _is_set_operation(node: ASTNode) -> bool:
-    return node.type in {
-        NodeType.UNION,
-        NodeType.INTERSECTION,
-        NodeType.DIFFERENCE,
-        NodeType.XOR,
-        NodeType.COMPLEMENT,
-        NodeType.CARTESIAN_PRODUCT,
-    }
+def _handle_set_operation(operation: SetOperationType, operands: Tuple[SetExpression, ...]) -> SetComprehension:
+    assert operands, "No operands given"
+    dims = [op.dim for op in operands]
+    assert all(d == dims[0] for d in dims), "Operands have differing dimensions"
+    dim = dims[0]
+
+
+
+    # Create fresh Variables for the result tuple (x1, x2, ..., x_dim)
+    var_names = [fresh_variable(Namespace.ARGUMENT) for _ in range(dim)]
+    result_vars = tuple(Variable(name, BaseSetType.INTEGERS) for i, name in enumerate(var_names))
+
+    # Realize each operand’s membership constraint in terms of these result_vars
+    realized = [
+        op.realize_constraints(tuple(var_names))
+        for op in operands
+    ]
+
+    match operation:
+        case SetOperationType.UNION:
+            # x in A u B  <=>  (A(x) \/ B(x) ∨ …)
+            clause = "(or " + " ".join(r for r in realized if r is not None) + ")"
+        case SetOperationType.INTERSECTION:
+            # x in A cap B  <=>  (A(x) /\ B(x) /\ ...)
+            clause = "(and " + " ".join(r for r in realized if r is not None) + ")"
+        case SetOperationType.DIFFERENCE:
+            # A \ B  <=>  (A(x) /\ ~B(x))
+            assert len(realized) == 2, "Difference expects exactly two operands"
+            a, b = realized
+            clause = f"(and {a} (not {b}))"
+        case SetOperationType.XOR:
+            # A xor B  <=>  (A(x) /\ ~B(x)) \/ (B(x) /\ ~A(x))
+            assert len(realized) == 2, "XOR expects exactly two operands"
+            a, b = realized
+            clause = f"(or (and {a} (not {b})) (and {b} (not {a})))"
+        case SetOperationType.COMPLEMENT:
+            # Complement of a single-set expression:  <=>  ~A(x)
+            assert len(realized) == 1, "Complement expects exactly one operand"
+            a, = realized
+            clause = f"(not {a})"
+        case SetOperationType.CARTESIAN_PRODUCT:
+            raise NotImplementedError("Cartesian product is not implemented")
+
+
+    guard = SMTGuard(result_vars, Template(clause))
+    return SetComprehension(
+        result_vars,
+        TupleDomain(tuple([BaseSetType.INTEGERS for _ in range(dim)])),
+        guard)
 
 
 def _process_tuple_domain(node: ASTNode) -> TupleDomain:
@@ -237,7 +276,7 @@ def _combine_plus(left: SetExpression, right: SetExpression, scopes: ScopeHandle
     if isinstance(right, BaseSet) and isinstance(left, ConstantVector):
         return _handle_base_plus_vector(right, left)
 
-    # Vector + Arithmetic (not implemented)
+    # Vector + Arithmetic
     if isinstance(left, ConstantVector) and isinstance(right, SetComprehension):
         return _handle_vector_plus_arithmetic(left, right)
     if isinstance(right, ConstantVector) and isinstance(left, SetComprehension):
@@ -245,13 +284,14 @@ def _combine_plus(left: SetExpression, right: SetExpression, scopes: ScopeHandle
 
     # BaseSet + Arithmetic (not implemented)
     if isinstance(left, BaseSet) or isinstance(right, BaseSet):
-        raise NotImplementedError(f"Base set addition not fully implemented")
+        pass
 
     # Arithmetic + Arithmetic
     if isinstance(left, SetComprehension) and isinstance(right, SetComprehension):
         return _handle_arithmetic_plus_arithmetic(left, right)
 
-    raise NotImplementedError(f"Unhandled PLUS types: {type(left)} + {type(right)}")
+
+    raise NotImplementedError(f"Unhandled PLUS types: {left} + {right}")
 
 def _handle_base_plus_vector(base_set: BaseSet, vector: ConstantVector) -> SetComprehension:
     existential_scalar = fresh_variable(Namespace.SCALAR)

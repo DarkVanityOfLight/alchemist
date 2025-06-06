@@ -57,8 +57,17 @@ class BaseSetType(Enum):
     REALS = NodeType.REALS
     EMPTY = NodeType.EMPTY
 
+class SetOperationType(Enum):
+    UNION = NodeType.UNION
+    INTERSECTION = NodeType.INTERSECTION
+    DIFFERENCE = NodeType.DIFFERENCE
+    XOR = NodeType.XOR
+    COMPLEMENT = NodeType.COMPLEMENT
+    CARTESIAN_PRODUCT = NodeType.CARTESIAN_PRODUCT
+
     
 BASE_SET_TYPES = {t.value for t in BaseSetType}
+SET_OPERATION_TYPES = {t.value for t in SetOperationType}
 
 ARITHMETIC_OPERATIONS = {
     NodeType.PLUS,
