@@ -1,6 +1,6 @@
 from __future__ import annotations
 from abc import abstractmethod, ABC
-from typing import Tuple
+from typing import Tuple, Optional
 from string import Template
 
 from common import Variable
@@ -18,7 +18,7 @@ class Guard(ABC):
     Or we have a Presburger guard
     """
     @abstractmethod
-    def realize_constraints(self, args: Tuple[str, ...]) -> str:
+    def realize_constraints(self, args: Tuple[str, ...]) -> Optional[str]:
         pass
 
 class SimpleGuard(Guard):
@@ -288,9 +288,8 @@ class SetGuard(Guard):
         else:
             self.arg_to_member_pos = None
 
-    def realize_constraints(self, args: Tuple[str, ...]) -> str:
+    def realize_constraints(self, args: Tuple[str, ...]) -> Optional[str]:
         if self.arg_to_member_pos:
-            # Reorder args to match set predicate's member order
             reordered_args = tuple(args[i] for i in self.arg_to_member_pos)
             return self.set_expr.realize_constraints(reordered_args)
         return self.set_expr.realize_constraints(args)
@@ -317,4 +316,4 @@ class SMTGuard(Guard):
 
     def __repr__(self) -> str:
         vars_str = ", ".join(var.name for var in self.variables)
-        return f"SMTGuard(variables=({vars_str}), template={self.template})"
+        return f"SMTGuard(variables=({vars_str}), template={self.template.template})"
