@@ -286,7 +286,7 @@ def _handle_vector_plus_arithmetic(vector: ConstantVector, arithmetic: SetCompre
 
     # Construct vector offset constraints: (arg_i = (+ vector_i bound_i))
     offset_constraints = [
-        f"(= ${arg.name} (+ {vector.components[i]} ${bound_arguments[i].name}))"
+        f"(= ${arg.name} (+ {vector.components[i]} {bound_arguments[i].name}))"
         for i, arg in enumerate(arguments)
     ]
 
