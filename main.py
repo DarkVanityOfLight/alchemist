@@ -36,9 +36,9 @@ if __name__ == "__main__":
     # ast.print_tree()
 
     ir = convert(ast)
-    print(ir)
-    smt_str = ir.realize_constraints(tuple([member.name for member in ir.members]))
+
+    args = [f"arg{i}" for i in range(ir.dim)]
+    smt_str = ir.realize_constraints(tuple(args))
 
     print(smt_str)
-
 
