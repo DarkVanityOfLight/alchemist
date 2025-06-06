@@ -9,6 +9,7 @@ from common import Variable, fresh_variable, Namespace, _smt_sort
 from guards import SMTGuard, SimpleGuard, SetGuard
 from sets import (
     BaseSet,
+    ConstantScalar,
     SetExpression,
     SetOperation,
     TupleDomain,
@@ -83,6 +84,9 @@ def _process_set_expression(node: ASTNode, scopes: ScopeHandler) -> SetExpressio
             components.append(int(child.value))
         return ConstantVector(tuple(components))
 
+    if node.type == NodeType.INTEGER:
+        return ConstantScalar(node.value)
+
     node.print_tree()
     raise NotImplementedError(f"Unsupported set expression type: {node.type} at line {node.line}")
 
@@ -139,14 +143,59 @@ def _combine_mul(left: SetExpression, right: SetExpression, scopes: ScopeHandler
     if isinstance(left, ConstantVector) or isinstance(right, ConstantVector):
         raise NotImplementedError(f"Vector multiplication not fully implemented at line")
 
-    # BaseSet × Arithmetic (not implemented)
+    # BaseSet × Arithmetic
     if isinstance(left, BaseSet) and isinstance(right, SetComprehension):
         return _handle_base_mul_arithmetic(left, right)
-
     if isinstance(right, BaseSet) and isinstance(left, SetComprehension):
         return _handle_base_mul_arithmetic(right, left)
 
+    # Scalar × Arithmetic
+    if isinstance(left, ConstantScalar) and isinstance(right, SetComprehension):
+        return _handle_scalar_mul_arithmetic(left, right)
+    if isinstance(right, ConstantScalar) and isinstance(left, SetComprehension):
+        return _handle_scalar_mul_arithmetic(right, left)
     raise NotImplementedError(f"Unhandled MUL types: {type(left)} * {type(right)}")
+
+def _handle_scalar_mul_arithmetic(
+    scalar: ConstantScalar, arithmetic: SetComprehension
+) -> SetComprehension:
+    # Create fresh result‐arguments matching arithmetic’s dimension
+    arguments = [
+        Variable(fresh_variable(Namespace.ARGUMENT), var.domain)
+        for var in arithmetic.members
+    ]
+
+    # Create fresh bound vars that will satisfy the original arithmetic constraints
+    bound_args = [
+        Variable(fresh_variable(Namespace.BOUND_ARGUMENT), var.domain)
+        for var in arithmetic.members
+    ]
+
+    # Realize the arithmetic’s own constraints over its bound vars
+    arithmetic_constraint = arithmetic.realize_constraints(
+        tuple(var.name for var in bound_args)
+    )
+
+    # Build multiplication constraints: (arg_i = (* scalar.value bound_i))
+    mul_constraints = [
+        f"(= ${arguments[i].name} (* {scalar.value} {bound_args[i].name}))"
+        for i in range(arithmetic.dim)
+    ]
+
+    # Combine original and multiply constraints, filtering out any None
+    parts = [arithmetic_constraint] + mul_constraints
+    parts_filtered = [p for p in parts if p is not None]
+    all_constraints = "(and " + " ".join(parts_filtered) + ")"
+
+    # Existentially quantify over all bound vars
+    bound_decls = " ".join(f"({_smt_sort(var.domain)} {var.name})" for var in bound_args)
+    quantified = f"(exists ({bound_decls}) {all_constraints})"
+
+    guard = SMTGuard(tuple(arguments), Template(quantified))
+    domain = TupleDomain(tuple(arg.domain for arg in arguments))
+
+    return SetComprehension(tuple(arguments), domain, guard)
+
 
 def _handle_base_mul_vector(base_set: BaseSet, vector: ConstantVector) -> SetComprehension:
     existential_scalar = fresh_variable(Namespace.SCALAR)

@@ -228,3 +228,21 @@ class ConstantVector(SetExpression):
 
     def __repr__(self) -> str:
         return f"Vector({','.join(str(c) for c in self.components)})"
+
+class ConstantScalar(SetExpression):
+    def __init__(self, scalar: Tuple[int, ...]) -> None:
+        self.value = scalar
+
+    @property
+    def dim(self) -> int:
+        return 1
+
+    @property
+    def arguments(self) -> Tuple[str, ...]:
+        raise UnsupportedOperationError()
+
+    def realize_constraints(self, args: Tuple[str, ...]) -> str:
+        raise UnsupportedOperationError()
+
+    def __repr__(self) -> str:
+        return f"Scalar({self.scalar})"
