@@ -2,10 +2,10 @@ from __future__ import annotations
 from string import Template
 from typing import TYPE_CHECKING, Tuple, cast
 
-from arm_ast import ARITHMETIC_OPERATIONS, BASE_SET_TYPES, ASTNode, NodeType
+from arm_ast import ARITHMETIC_OPERATIONS, BASE_SET_TYPES, ASTNode, NodeType, BaseSetType 
 from scope_handler import ScopeHandler
 
-from common import Variable, SetType, get_fresh_variable, node_type_to_set_type
+from common import Variable, get_fresh_variable
 from guards import SMTGuard, SimpleGuard, SetGuard
 from sets import (
     BaseSet,
@@ -50,7 +50,7 @@ def _process_set_expression(node: ASTNode, scopes: ScopeHandler) -> SetExpressio
     assert node is not None
 
     if _is_base_set(node):
-        return BaseSet(node_type_to_set_type(node.type))
+        return BaseSet(BaseSetType(node.type))
 
     if _is_set_operation(node):
         operands = [_process_set_expression(child, scopes) for child in node]
@@ -67,12 +67,8 @@ def _process_set_expression(node: ASTNode, scopes: ScopeHandler) -> SetExpressio
         if tuple_domain is not None:
             return tuple_domain
 
-    if node.type == NodeType.MUL:
-        return _process_mul(node, scopes)
-
-    if node.type == NodeType.PLUS:
-        # Not yet implemented, keep placeholder
-        pass
+    if node.type in ARITHMETIC_OPERATIONS:
+        return _process_arithmetic(node, scopes)
 
     if node.type == NodeType.VECTOR:
         # Not yet implemented, keep placeholder
@@ -105,15 +101,22 @@ def _is_set_operation(node: ASTNode) -> bool:
 
 def _try_tuple_domain(node: ASTNode) -> TupleDomain | None:
     children = list(node)
-    if all(child.type in {NodeType.NATURALS, NodeType.INTEGERS, NodeType.POSITIVES, NodeType.REALS} for child in children):
-        types = tuple(
-            "Nat" if c.type == NodeType.NATURALS else
-            "Int" if c.type == NodeType.INTEGERS else
-            "Real"
-            for c in children
-        )
-        return TupleDomain(cast(Tuple[SetType, ...], types))
+    if all(child.type in BASE_SET_TYPES for child in children):
+        types = tuple(BaseSetType(child.type) for child in children)
+        return TupleDomain(types)
     return None
+
+
+def _process_arithmetic(node: ASTNode, scopes: ScopeHandler) -> SetExpression:
+
+    match node.type:
+        case NodeType.MUL:
+            return _process_mul(node, scopes)
+        case NodeType.PLUS:
+            return _process_plus(node, scopes)
+
+    node.print_tree()
+    raise NotImplementedError(f"Unimplemented arithmetic operator {node.type}")
 
 
 # ─── Multiplication Cases ────────────────────────────────────────────────────────
@@ -122,19 +125,31 @@ def _process_mul(node: ASTNode, scopes: ScopeHandler) -> SetExpression:
     a, b = node.children
     types = (a.type, b.type)
 
-    if _is_base_times_vector(types):
+    if _is_base_mul_vector(types):
         base_node, vec_node = (a, b) if a.type in BASE_SET_TYPES else (b, a)
         return _handle_base_mul_vector(base_node, vec_node)
 
-    if _is_identifier_times_integer(types):
+    if _is_identifier_mul_integer(types):
         # Placeholder: arithmetic on a set by a scalar (not implemented)
         pass
 
+    if _is_arithmetic_mul_arithmetic(types):
+        pass
+
+    if _is_base_mul_arithmetic(types):
+        base_node, vec_node = (a, b) if a.type in BASE_SET_TYPES else (b, a)
+        return _handle_base_mul_arithmetic(base_node, vec_node, scopes)
+
+    if _is_vec_mul_arithmetic(types):
+        vec_node, arithmetic = (a, b) if a.type == NodeType.PAREN else (b, a)
+        return _handle_vec_mul_arithmetic(vec_node, arithmetic, scopes)
+
     # Other MUL cases (e.g., Vector * Identifier) similarly unhandled => raise
+    node.print_tree()
     raise NotImplementedError(f"Unhandled MUL case: {a.type} * {b.type}")
 
 
-def _is_base_times_vector(types: Tuple[NodeType, NodeType]) -> bool:
+def _is_base_mul_vector(types: Tuple[NodeType, NodeType]) -> bool:
     t1, t2 = types
     return (
         (t1 in BASE_SET_TYPES and t2 == NodeType.PAREN)
@@ -142,12 +157,23 @@ def _is_base_times_vector(types: Tuple[NodeType, NodeType]) -> bool:
     )
 
 
-def _is_identifier_times_integer(types: Tuple[NodeType, NodeType]) -> bool:
+def _is_identifier_mul_integer(types: Tuple[NodeType, NodeType]) -> bool:
     t1, t2 = types
     return (
         (t1 == NodeType.IDENTIFIER and t2 == NodeType.INTEGER)
         or (t1 == NodeType.INTEGER and t2 == NodeType.IDENTIFIER)
     )
+
+def _is_arithmetic_mul_arithmetic(types: Tuple[NodeType, NodeType]) -> bool:
+    return False
+
+def _is_base_mul_arithmetic(types: Tuple[NodeType, NodeType]):
+    t1, t2 = types
+    return (t1 in BASE_SET_TYPES and t2 in ARITHMETIC_OPERATIONS) or (t1 in ARITHMETIC_OPERATIONS and t2 in BASE_SET_TYPES)
+
+def _is_vec_mul_arithmetic(types: Tuple[NodeType, NodeType]):
+    t1, t2 = types
+    return (t1 == NodeType.PAREN and t2 in ARITHMETIC_OPERATIONS) or (t1 in ARITHMETIC_OPERATIONS and t2 == NodeType.PAREN)
 
 
 def _handle_base_mul_vector(base_node: ASTNode, vec_node: ASTNode) -> SetComprehension:
@@ -171,13 +197,51 @@ def _handle_base_mul_vector(base_node: ASTNode, vec_node: ASTNode) -> SetCompreh
     guard = SMTGuard(argument_vars, smt_template)
 
     # Debug print remains exactly as before
-    print(SetComprehension(argument_vars, BaseSet(node_type_to_set_type(base_node.type)), guard))
+    print(SetComprehension(argument_vars, BaseSet(BaseSetType(base_node.type)), guard))
 
     return SetComprehension(
         argument_vars,
-        BaseSet(node_type_to_set_type(base_node.type)),
+        BaseSet(BaseSetType(base_node.type)),
         guard,
     )
+
+def _handle_base_mul_arithmetic(base_node: ASTNode, arithmetic: ASTNode, scopes: ScopeHandler) -> SetComprehension:
+    # Process the inner arithmetic subtree into a SetComprehension
+    s = _process_arithmetic(arithmetic, scopes)
+    dim = s.dim
+    assert dim > 0, "Arithmetic subexpression must yield a nonzero‐dim vector"
+
+    base_type = BaseSetType(base_node.type)
+
+    # Fresh existential scalar “a” ∈ A
+    existential_scalar = get_fresh_variable("scalar")
+
+    # “y” variables for the final result (one per dimension)
+    result_vars = tuple(Variable(get_fresh_variable("argument"), None) for _ in range(dim))
+    # “x” variables come from s.argument_vars
+    inner_vars = s.arguments
+
+    # Build scaling clauses: (= (* a x_i) y_i)
+    scaling_clauses = [
+        f"(= (* {existential_scalar} {x}) ${y.name})"
+        for x, y in zip(inner_vars, result_vars)
+    ]
+    scaling_and = "(and " + " ".join(scaling_clauses) + ")"
+
+    # Realize “x ∈ S” via s.realize_constraints
+    args_x = tuple(x for x in inner_vars)
+    s_constraint = s.realize_constraints(args_x)
+
+    # Combine “x ∈ S” with scaling under ∃a
+    combined_body = f"(and {s_constraint} {scaling_and})"
+    smt_guard = _build_smt_exists(base_node.type, existential_scalar, combined_body)
+
+    guard = SMTGuard(result_vars, Template(smt_guard))
+    return SetComprehension(result_vars, BaseSet(base_type), guard)
+
+
+def _handle_vec_mul_arithmetic(vec: ASTNode, arithmetic: ASTNode, scopes: ScopeHandler) -> SetComprehension:
+    raise NotImplementedError()
 
 
 def _build_smt_exists(base_type: NodeType, scalar: str, body: str) -> str:
@@ -192,6 +256,58 @@ def _build_smt_exists(base_type: NodeType, scalar: str, body: str) -> str:
             return f"(exists (Real {scalar}) (and {body}))"
         case _:
             raise ValueError(f"No domain for type: {base_type}")
+
+
+# --- Plus Cases ────────────────────────────────────────────────────────
+def _process_plus(node: ASTNode, scopes: ScopeHandler):
+    assert_node_type(node, NodeType.PLUS)
+    a, b = node.children
+    types = (a.type, b.type)
+
+    if _is_base_plus_vector(types):
+        pass
+
+    # Other MUL cases (e.g., Vector * Identifier) similarly unhandled => raise
+    node.print_tree()
+    raise NotImplementedError(f"Unhandled MUL case: {a.type} * {b.type}")
+
+
+def _is_base_plus_vector(types: Tuple[NodeType, NodeType]) -> bool:
+    t1, t2 = types
+    return (
+        (t1 in BASE_SET_TYPES and t2 == NodeType.PAREN)
+        or (t1 == NodeType.PAREN and t2 in BASE_SET_TYPES)
+    )
+
+def _handle_base_plus_vector(base_node: ASTNode, vec_node: ASTNode) -> SetComprehension:
+    assert all(child.type == NodeType.INTEGER for child in vec_node.children), "Vector must be integers"
+
+    # Fresh existential scalar
+    existential_scalar = get_fresh_variable("scalar")
+
+    # Create argument variables matching vector dimensions
+    argument_vars = tuple(Variable(get_fresh_variable("argument"), None) for _ in vec_node.children)
+
+    # Build SMT guard clauses "(= (* scalar coeff) $argument)"
+    guard_clauses = [
+        f"(= (+ {existential_scalar} {coeff.value}) ${argument.name})"
+        for coeff, argument in zip(vec_node.children, argument_vars)
+    ]
+    guard_body = f"(and {' '.join(guard_clauses)})"
+
+    smt_guard = _build_smt_exists(base_node.type, existential_scalar, guard_body)
+    smt_template = Template(smt_guard)
+    guard = SMTGuard(argument_vars, smt_template)
+
+    # Debug print remains exactly as before
+    print(SetComprehension(argument_vars, BaseSet(BaseSetType(base_node.type)), guard))
+
+    return SetComprehension(
+        argument_vars,
+        BaseSet(BaseSetType(base_node.type)),
+        guard,
+    )
+
 
 
 # ─── Set Comprehension ────────────────────────────────────────────────────────────
@@ -216,7 +332,7 @@ def _process_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> SetCompre
     elif isinstance(domain_expr, SetComprehension):
         members = domain_expr.members
     else:
-        members = tuple(Variable(name, "INTEGERS") for name in member_names)
+        members = tuple(Variable(name, BaseSetType.INTEGERS) for name in member_names)
 
     guard_node = members_in_domain.next
     guard = _process_guard(guard_node, members, scopes)

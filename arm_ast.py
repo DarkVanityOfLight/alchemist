@@ -1,5 +1,4 @@
 from enum import Enum
-from re import A
 from typing import Iterator, Optional, Self, List
 
 class NodeType(Enum):
@@ -51,13 +50,15 @@ class NodeType(Enum):
     FORALL = "FORALL"
     EXISTS = "EXISTS"
 
-BASE_SET_TYPES = {
-    NodeType.INTEGERS,
-    NodeType.NATURALS,
-    NodeType.POSITIVES,
-    NodeType.REALS,
-    NodeType.EMPTY,
-}
+class BaseSetType(Enum):
+    INTEGERS = NodeType.INTEGERS
+    NATURALS = NodeType.NATURALS
+    POSITIVES = NodeType.POSITIVES
+    REALS = NodeType.REALS
+    EMPTY = NodeType.EMPTY
+
+    
+BASE_SET_TYPES = {t.value for t in BaseSetType}
 
 ARITHMETIC_OPERATIONS = {
     NodeType.PLUS,

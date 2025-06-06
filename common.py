@@ -1,19 +1,12 @@
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 
-from arm_ast import BASE_SET_TYPES, NodeType
-
-type SetType = Literal["NATURALS", "INTEGERS", "POSITIVES", "REALS", "EMPTY"]
-
-def node_type_to_set_type(node_type: NodeType) -> SetType:
-    if node_type.value in Literal["NATURALS", "INTEGERS", "POSITIVES", "REALS", "EMPTY"].__args__:
-        return node_type.value  # type: ignore
-    raise ValueError(f"Unsupported NodeType: {node_type}")
+from arm_ast import BaseSetType
 
 @dataclass(frozen=True)
 class Variable:
     name: str
-    domain: Optional[SetType]
+    domain: Optional[BaseSetType]
 
     def __repr__(self):
         return f"{self.name}: {self.domain}"
@@ -38,3 +31,5 @@ fresh_variable_oracle = FreshVariableOracle(
 def get_fresh_variable(namespace: str) -> str:
     return fresh_variable_oracle.fresh_variable(namespace)
 
+class UnsupportedOperationError(Exception):
+    pass

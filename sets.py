@@ -2,14 +2,14 @@ from __future__ import annotations
 from abc import abstractmethod, ABC
 from typing import Tuple, List
 
-from common import Variable, SetType
+from common import UnsupportedOperationError, Variable, BaseSetType
 from arm_ast import NodeType
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from guards import Guard
 
-type SymbolicalSet = TupleDomain | FiniteSet | SetOperation | ArithmeticExpression
+type SymbolicalSet = TupleDomain | FiniteSet | SetOperation
 type Predicate = SetExpression
 
 class SetExpression(ABC):
@@ -20,43 +20,38 @@ class SetExpression(ABC):
     @property
     @abstractmethod
     def dim(self) -> int:
-        pass
+        raise NotImplementedError()
 
-class ArithmeticExpression(SetExpression):
-    """Represents scalar multiplication of a set (e.g., 2 * G0)"""
-    def __init__(self,set_expr: SetExpression):
-        self.set_expr = set_expr
-    
     @property
-    def dim(self) -> int:
-        return self.set_expr.dim
-    
-    def realize_constraints(self, args: Tuple[str, ...]) -> str:
-        return NotImplemented
-    
-    def __repr__(self):
-        return NotImplemented
+    @abstractmethod
+    def arguments(self) -> Tuple[str, ...]:
+        raise NotImplementedError()
 
 class TupleDomain(SetExpression):
     """Represents a product type domain like (int, int, nat)"""
-    def __init__(self, types: Tuple[SetType, ...]) -> None:
-        self.types = types
+    def __init__(self, types: Tuple[BaseSetType, ...]) -> None:
+        assert all(isinstance(t, BaseSetType) for t in types)
+        self.types: Tuple[BaseSetType, ...] = types
 
     @property
     def dim(self) -> int:
         return len(self.types)
+
+    @property
+    def arguments(self) -> Tuple[str, ...]:
+        return tuple(["farg{i}" for i in range(self.dim)])
 
     def __len__(self):
         return len(self.types)
 
-    def __getitem__(self, index: int) -> SetType:
+    def __getitem__(self, index: int) -> BaseSetType:
         return self.types[index]
 
     def __iter__(self):
         return iter(self.types)
 
     def __repr__(self):
-        return f"TupleDomain({', '.join(self.types)})"
+        return f"TupleDomain({', '.join(t.name for t in self.types)})"
     
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         if len(self.types) != len(args):
@@ -74,13 +69,20 @@ class TupleDomain(SetExpression):
 
 
 class BaseSet(SetExpression):
-    def __init__(self, set_type: SetType):
+    def __init__(self, set_type: BaseSetType):
         self.set_type = set_type
 
     @property
     def dim(self) -> int:
+        """"""
+        if self.set_type != BaseSetType.EMPTY:
+            return 0
+        return 1
+
+    @property
+    def arguments(self) -> Tuple[str, ...]:
         """Asking a base set for a dimension is not intended, since it can take any dimension"""
-        return -1
+        raise UnsupportedOperationError()
     
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         """Impose the base set constraint on all args"""
@@ -112,8 +114,12 @@ class FiniteSet(SetExpression):
     def dim(self) -> int:
         return self._dim
 
+    @property
+    def arguments(self) -> Tuple[str, ...]:
+        raise NotImplementedError()
+
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
-        return NotImplemented
+        raise NotImplementedError()
     
 class SetOperation(SetExpression):
     """
@@ -121,12 +127,20 @@ class SetOperation(SetExpression):
     but rather represents the set we get by applying the operation
     """
     def __init__(self, op: NodeType, sets: List[SetExpression]):
+        dim = sets[0].dim
+        if any(s.dim != dim for s in sets):
+            raise ValueError("All sets must have the same dimension")
+
         self.op = op
         self.sets = sets
 
     @property
     def dim(self) -> int:
         return self.sets[0].dim
+
+    @property
+    def arguments(self) -> Tuple[str, ...]:
+        return tuple([f"argument_{i}" for i in range(self.dim)])
         
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         set_strs = [s.realize_constraints(args) for s in self.sets]
@@ -165,6 +179,10 @@ class SetComprehension(SetExpression):
     @property
     def dim(self) -> int:
         return len(self.members)
+
+    @property
+    def arguments(self) -> Tuple[str, ...]:
+        return tuple(v.name for v in self.members)
 
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         domain_cond = self.domain.realize_constraints(args)
