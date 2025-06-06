@@ -25,7 +25,9 @@ def NINT(value, line):
 
 
 precedence = (
-    ('right', 'UMINUS', 'UPLUS', 'UMINUS_ARITH', 'UPLUS_ARITH', 'NOT', '!'),
+    ('left', '+', '-'),
+    ('left', '*', '/', '%'),
+    ('right', 'UMINUS', 'UPLUS', 'NOT', '!'),
 )
 
 
@@ -143,37 +145,58 @@ def p_set(p):
            | POSITIVES
            | REALS
            | EMPTY'''
-    if len(p) == 4:
-        if p[2] == '||': op = NodeType.UNION
-        elif p[2] == '\\': op = NodeType.DIFFERENCE
-        elif p[2] == '^': op = NodeType.XOR
-        elif p[2] == '&&': op = NodeType.INTERSECTION
-        elif p[2] == '+': op = NodeType.PLUS
-        elif p[2] == '-': op = NodeType.MINUS
-        elif p[2] == '*': op = NodeType.MUL
-        elif p[2] == '/': op = NodeType.DIV
-        elif p[2] == '%': op = NodeType.MOD
-        elif p[2] == '$': op = NodeType.POWER
-        else:  # Parentheses
+    # Binary‐operator cases (length == 4)
+    if len(p) == 4 and isinstance(p[1], ASTNode) and isinstance(p[3], ASTNode):
+        # Determine which operator token was used
+        tok_type = p.slice[2].type
+        if tok_type == 'UNION':
+            op = NodeType.UNION
+        elif tok_type == 'BACKSLASH':
+            op = NodeType.DIFFERENCE
+        elif tok_type == '^':
+            op = NodeType.XOR
+        elif tok_type == 'INTERSECTION':
+            op = NodeType.INTERSECTION
+        elif tok_type == '+':
+            op = NodeType.PLUS
+        elif tok_type == '-':
+            op = NodeType.MINUS
+        elif tok_type == '*':
+            op = NodeType.MUL
+        elif tok_type == '/':
+            op = NodeType.DIV
+        elif tok_type == '%':
+            op = NodeType.MOD
+        elif tok_type == '$':
+            op = NodeType.POWER
+        else:
+            # Parenthesized‐tuple case:  '( list_of_boolean_combinations )'
             if p[1] == '(' and isinstance(p[2], list):
                 op = NodeType.CARTESIAN_PRODUCT
                 p[0] = U_NE(op, p[2], p.lineno(1))
                 return
+            # Parenthesized‐set case: '( set )'
             else:
                 op = NodeType.PAREN
                 p[0] = U_NE(op, p[2], p.lineno(1))
                 return
+
         p[0] = B_NE(op, p[1], p[3], p.lineno(2))
+
+    # Unary‐operator cases (length == 3)
     elif len(p) == 3:
-        if p[1] == '!' or p[1] == 'not':
+        if p.slice[1].type in ('!', 'NOT'):
             op = NodeType.COMPLEMENT
-        elif p[1] == '-':
+            p[0] = U_NE(op, p[2], p.lineno(1))
+        elif p.slice[1].type == '-':  # UMINUS
             op = NodeType.NEG
-        else:  # UPLUS
+            p[0] = U_NE(op, p[2], p.lineno(1))
+        else:  # '+' integer with UPLUS precedence
             p[0] = p[2]
-            return
-        p[0] = U_NE(op, p[2], p.lineno(1))
-    elif len(p) == 2:
+
+    # All other cases (length == 2 or more specific patterns)
+    else:
+        # NATURALS, INTEGERS, POSITIVES, REALS, EMPTY
         if p[1] == 'nat':
             p[0] = U_NE(NodeType.NATURALS, None, p.lineno(1))
         elif p[1] == 'int':
@@ -184,8 +207,23 @@ def p_set(p):
             p[0] = U_NE(NodeType.REALS, None, p.lineno(1))
         elif p[1] == 'empty':
             p[0] = U_NE(NodeType.EMPTY, None, p.lineno(1))
+        # Parenthesized boolean combinations: '( list_of_boolean_combinations )'
+        elif p[1] == '(' and isinstance(p[2], list) and p[3] == ')':
+            p[0] = U_NE(NodeType.CARTESIAN_PRODUCT, p[2], p.lineno(1))
+        # Parenthesized single set: '( set )'
+        elif p[1] == '(' and isinstance(p[2], ASTNode) and p[3] == ')':
+            p[0] = U_NE(NodeType.PAREN, p[2], p.lineno(1))
+        # Simple‐set, list‐element, range, or integer literal
+        elif isinstance(p[1], ASTNode):
+            p[0] = p[1]
+        # Binary power: 'set $ integer'
+        elif len(p) == 4 and p.slice[2].type == '$':
+            p[0] = B_NE(NodeType.POWER, p[1], p[3], p.lineno(2))
+        # '+' integer (unary plus)
+        elif len(p) == 3 and p.slice[1].type == '+':
+            p[0] = p[2]
         else:
-            p[0] = p[1]  # integer or list_element
+            p[0] = p[1]
 
 def p_integer(p):
     'integer : UINT'
@@ -290,11 +328,11 @@ def p_term(p):
             | term '*' term
             | term '/' term
             | term '%' term
-            | '-' term %prec UMINUS_ARITH
+            | '-' term %prec UMINUS
             | vector_of_terms
             | list_element
             | integer
-            | '+' integer %prec UPLUS_ARITH'''
+            | '+' integer %prec UPLUS'''
     if len(p) == 4:
         if p[2] == '+': op = NodeType.PLUS
         elif p[2] == '-': op = NodeType.MINUS

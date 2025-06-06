@@ -10,7 +10,7 @@ tokens = (
 )
 
 # Literal characters (single-character tokens)
-literals = ['+', '-', '*', '/', '=', '<', '>', '(', ')', '{', '}', '[', ']', ',', ';', ':', '.', '|', "^"]
+literals = ['+', '-', '*', '/', '%', '=', '<', '>', '(', ')', '{', '}', '[', ']', ',', ';', ':', '.', '|', '^']
 
 # Reserved keywords
 reserved = {
