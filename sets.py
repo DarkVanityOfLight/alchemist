@@ -190,4 +190,20 @@ class SetComprehension(SetExpression):
         return f"(and {domain_cond} {guard_cond})"
 
     def __repr__(self):
-        return f"SetPredicate({self.members} IN {self.domain} WHERE {self.guard})"
+        return f"SetComprehension({self.members} IN {self.domain} WHERE {self.guard})"
+
+
+class ConstantVector(SetExpression):
+    def __init__(self, components: Tuple[int, ...]) -> None:
+        self.components = components
+
+    @property
+    def dim(self) -> int:
+        return len(self.components)
+
+    @property
+    def arguments(self) -> Tuple[str, ...]:
+        raise UnsupportedOperationError()
+
+    def realize_constraints(self, args: Tuple[str, ...]) -> str:
+        raise UnsupportedOperationError()

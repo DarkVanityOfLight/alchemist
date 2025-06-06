@@ -6,7 +6,7 @@ from arm_ast import BaseSetType
 @dataclass(frozen=True)
 class Variable:
     name: str
-    domain: Optional[BaseSetType]
+    domain: BaseSetType
 
     def __repr__(self):
         return f"{self.name}: {self.domain}"
@@ -25,7 +25,7 @@ class FreshVariableOracle:
 
 
 fresh_variable_oracle = FreshVariableOracle(
-    ["scalar", "vector", "variable", "argument"]
+    ["scalar", "vector", "variable", "bound_argument"]
 )
 
 def get_fresh_variable(namespace: str) -> str:
