@@ -1,6 +1,6 @@
 from __future__ import annotations
 from abc import abstractmethod, ABC
-from typing import Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional
 
 from common import UnsupportedOperationError, Variable, BaseSetType
 from arm_ast import NodeType
@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from guards import Guard
 
-type SymbolicalSet = TupleDomain | FiniteSet | SetOperation
-type Predicate = SetExpression
-
+# --- Base Abstract Class ---
 class SetExpression(ABC):
+    __slots__ = ()  # no per-instance attributes
+
     @abstractmethod
     def realize_constraints(self, args: Tuple[str, ...]) -> Optional[str]:
         pass
@@ -27,8 +27,11 @@ class SetExpression(ABC):
     def arguments(self) -> Tuple[str, ...]:
         raise NotImplementedError()
 
+# --- TupleDomain ---
 class TupleDomain(SetExpression):
     """Represents a product type domain like (int, int, nat)"""
+    __slots__ = ("types",)
+
     def __init__(self, types: Tuple[BaseSetType, ...]) -> None:
         assert all(isinstance(t, BaseSetType) for t in types)
         self.types: Tuple[BaseSetType, ...] = types
@@ -39,7 +42,7 @@ class TupleDomain(SetExpression):
 
     @property
     def arguments(self) -> Tuple[str, ...]:
-        return tuple(["farg{i}" for i in range(self.dim)])
+        return tuple([f"farg{i}" for i in range(self.dim)])
 
     def __len__(self):
         return len(self.types)
@@ -76,14 +79,15 @@ class TupleDomain(SetExpression):
             return filtered[0]
         return f"(and {' '.join(filtered)})"
 
-
+# --- BaseSet ---
 class BaseSet(SetExpression):
+    __slots__ = ("set_type",)
+
     def __init__(self, set_type: BaseSetType):
         self.set_type = set_type
 
     @property
     def dim(self) -> int:
-        """"""
         if self.set_type != BaseSetType.EMPTY:
             return 0
         return 1
@@ -98,11 +102,11 @@ class BaseSet(SetExpression):
         if not args:
             raise ValueError("No arguments provided for base set constraint")
 
-        if self.set_type == "NATURALS":
+        if self.set_type == BaseSetType.NATURALS:
             return "(and " + " ".join(f"(>= {arg} 0)" for arg in args) + ")"
-        elif self.set_type == "POSITIVES":
+        elif self.set_type == BaseSetType.POSITIVES:
             return "(and " + " ".join(f"(> {arg} 0)" for arg in args) + ")"
-        elif self.set_type == "EMPTY":
+        elif self.set_type == BaseSetType.EMPTY:
             return "false"
         else:
             return None
@@ -110,7 +114,10 @@ class BaseSet(SetExpression):
     def __repr__(self):
         return f"BaseSet({self.set_type})"
 
+# --- FiniteSet ---
 class FiniteSet(SetExpression):
+    __slots__ = ("elements", "_dim")
+
     def __init__(self, elements: List[Tuple[int, ...]]):
         self.elements = elements
         self._dim = len(elements[0]) if elements else 0
@@ -125,63 +132,11 @@ class FiniteSet(SetExpression):
 
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         raise NotImplementedError()
-    
-# class SetOperation(SetExpression):
-#     """
-#     A set operation is not a real set,
-#     but rather represents the set we get by applying the operation
-#     """
-#     def __init__(self, op: NodeType, sets: List[SetExpression]):
-#         dim = sets[0].dim
-#         if any(s.dim != dim for s in sets):
-#             raise ValueError("All sets must have the same dimension")
-#
-#         self.op = op
-#         self.sets = sets
-#
-#     @property
-#     def dim(self) -> int:
-#         return self.sets[0].dim
-#
-#     @property
-#     def arguments(self) -> Tuple[str, ...]:
-#         return tuple([f"argument_{i}" for i in range(self.dim)])
-#         
-#     def realize_constraints(self, args: Tuple[str, ...]) -> str:
-#         set_strs = []
-#         for s in self.sets:
-#             val = s.realize_constraints(args)
-#             if val is not None:
-#                 set_strs.append(val)
-#
-#         assert len(set_strs) >= 2
-#         
-#         if self.op == NodeType.UNION:
-#             return "(or " + " ".join(set_strs) + ")"
-#         elif self.op == NodeType.INTERSECTION:
-#             return "(and " + " ".join(set_strs) + ")"
-#         elif self.op == NodeType.DIFFERENCE:
-#             if len(self.sets) != 2:
-#                 raise ValueError("Difference requires exactly two sets")
-#             return f"(and {set_strs[0]} (not {set_strs[1]}))"
-#         elif self.op == NodeType.XOR:
-#             if len(self.sets) != 2:
-#                 raise ValueError("XOR requires exactly two sets")
-#             return f"(xor {set_strs[0]} {set_strs[1]})"
-#         elif self.op == NodeType.COMPLEMENT:
-#             if len(self.sets) != 1:
-#                 raise ValueError("Complement requires exactly one set")
-#             return f"(not {set_strs[0]})"
-#         elif self.op == NodeType.CARTESIAN_PRODUCT:
-#             # Requires specialized handling
-#             raise NotImplementedError("Cartesian product not implemented")
-#         else:
-#             raise NotImplementedError(f"Unsupported set operation: {self.op}")
-#
-#     def __repr__(self):
-#         return f"SetOperation({self.op}, {len(self.sets)} sets)"
 
+# --- SetComprehension ---
 class SetComprehension(SetExpression):
+    __slots__ = ("members", "domain", "guard")
+
     def __init__(self, members: Tuple[Variable, ...], domain: SetExpression, guard: Guard):
         self.members = members
         self.domain = domain
@@ -210,8 +165,10 @@ class SetComprehension(SetExpression):
     def __repr__(self):
         return f"SetComprehension({self.members} IN {self.domain} WHERE {self.guard})"
 
-
+# --- ConstantVector ---
 class ConstantVector(SetExpression):
+    __slots__ = ("components",)
+
     def __init__(self, components: Tuple[int, ...]) -> None:
         self.components = components
 
@@ -224,13 +181,20 @@ class ConstantVector(SetExpression):
         raise UnsupportedOperationError()
 
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
-        raise UnsupportedOperationError()
+        """Interprete this vector as the singelton set only containing this vector"""
+        assert len(args) == self.dim
+
+        eqs = [f"(= {args[i]} {self.components[i]})" for i in range(self.dim)]
+        return f"(and {' '.join(eqs)})"
 
     def __repr__(self) -> str:
         return f"Vector({','.join(str(c) for c in self.components)})"
 
+# --- ConstantScalar ---
 class ConstantScalar(SetExpression):
-    def __init__(self, scalar: Tuple[int, ...]) -> None:
+    __slots__ = ("value",)
+
+    def __init__(self, scalar: int) -> None:
         self.value = scalar
 
     @property

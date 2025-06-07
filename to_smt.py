@@ -14,7 +14,6 @@ from sets import (
     TupleDomain,
     FiniteSet,
     SetComprehension,
-    Predicate,
     ConstantVector
 )
 
@@ -96,49 +95,57 @@ def _handle_set_operation(operation: SetOperationType, operands: Tuple[SetExpres
     assert all(d == dims[0] for d in dims), "Operands have differing dimensions"
     dim = dims[0]
 
+    # Create fresh result variables (outer variables)
+    result_var_names = [fresh_variable(Namespace.ARGUMENT) for _ in range(dim)]
+    result_vars = tuple(Variable(name, BaseSetType.INTEGERS) for name in result_var_names)
 
+    # Create fresh bound variables for internal quantification
+    bound_var_names = [fresh_variable(Namespace.BOUND_ARGUMENT) for _ in range(dim)]
+    bound_vars = tuple(Variable(name, BaseSetType.INTEGERS) for name in bound_var_names)
 
-    # Create fresh Variables for the result tuple (x1, x2, ..., x_dim)
-    var_names = [fresh_variable(Namespace.ARGUMENT) for _ in range(dim)]
-    result_vars = tuple(Variable(name, BaseSetType.INTEGERS) for i, name in enumerate(var_names))
-
-    # Realize each operand’s membership constraint in terms of these result_vars
+    # Realize each operand’s membership constraints in terms of bound vars
     realized = [
-        op.realize_constraints(tuple(var_names))
+        op.realize_constraints(tuple(bound_var_names))
         for op in operands
     ]
 
+    # Add equality constraints linking result_vars to bound_vars (arg_i = bound_i)
+    equality_constraints = [
+        f"(= ${result_vars[i].name} {bound_vars[i].name})" for i in range(dim)
+    ]
+
+    # Combine constraints for the set operation
     match operation:
         case SetOperationType.UNION:
-            # x in A u B  <=>  (A(x) \/ B(x) ∨ …)
-            clause = "(or " + " ".join(r for r in realized if r is not None) + ")"
+            op_clause = "(or " + " ".join(r for r in realized if r is not None) + ")"
         case SetOperationType.INTERSECTION:
-            # x in A cap B  <=>  (A(x) /\ B(x) /\ ...)
-            clause = "(and " + " ".join(r for r in realized if r is not None) + ")"
+            op_clause = "(and " + " ".join(r for r in realized if r is not None) + ")"
         case SetOperationType.DIFFERENCE:
-            # A \ B  <=>  (A(x) /\ ~B(x))
             assert len(realized) == 2, "Difference expects exactly two operands"
             a, b = realized
-            clause = f"(and {a} (not {b}))"
+            op_clause = f"(and {a} (not {b}))"
         case SetOperationType.XOR:
-            # A xor B  <=>  (A(x) /\ ~B(x)) \/ (B(x) /\ ~A(x))
             assert len(realized) == 2, "XOR expects exactly two operands"
             a, b = realized
-            clause = f"(or (and {a} (not {b})) (and {b} (not {a})))"
+            op_clause = f"(or (and {a} (not {b})) (and {b} (not {a})))"
         case SetOperationType.COMPLEMENT:
-            # Complement of a single-set expression:  <=>  ~A(x)
             assert len(realized) == 1, "Complement expects exactly one operand"
-            a, = realized
-            clause = f"(not {a})"
+            (a,) = realized
+            op_clause = f"(not {a})"
         case SetOperationType.CARTESIAN_PRODUCT:
             raise NotImplementedError("Cartesian product is not implemented")
 
+    # Combine operation clause and equality constraints
+    all_constraints = "(and " + op_clause + " " + " ".join(equality_constraints) + ")"
 
-    guard = SMTGuard(result_vars, Template(clause))
-    return SetComprehension(
-        result_vars,
-        TupleDomain(tuple([BaseSetType.INTEGERS for _ in range(dim)])),
-        guard)
+    # Existential quantification over bound vars
+    bound_decls = " ".join(f"({var.name} {_smt_sort(var.domain)})" for var in bound_vars)
+    quantified = f"(exists ({bound_decls}) {all_constraints})"
+
+    guard = SMTGuard(result_vars, Template(quantified))
+    domain = TupleDomain(tuple(arg.domain for arg in result_vars))
+
+    return SetComprehension(result_vars, domain, guard)
 
 
 def _process_tuple_domain(node: ASTNode) -> TupleDomain:
@@ -180,7 +187,12 @@ def _combine_mul(left: SetExpression, right: SetExpression, scopes: ScopeHandler
 
     # Vector × Arithmetic (not implemented)
     if isinstance(left, ConstantVector) or isinstance(right, ConstantVector):
-        raise NotImplementedError(f"Vector multiplication not fully implemented at line")
+        pass
+
+    if isinstance(left, ConstantVector) and isinstance(right, ConstantScalar):
+        return ConstantVector(tuple([right.value * comp for comp in left.components]))
+    if isinstance(right, ConstantVector) and isinstance(left, ConstantScalar):
+        return ConstantVector(tuple([left.value * comp for comp in right.components]))
 
     # BaseSet × Arithmetic
     if isinstance(left, BaseSet) and isinstance(right, SetComprehension):
@@ -227,7 +239,7 @@ def _handle_scalar_mul_arithmetic(
     all_constraints = "(and " + " ".join(parts_filtered) + ")"
 
     # Existentially quantify over all bound vars
-    bound_decls = " ".join(f"({_smt_sort(var.domain)} {var.name})" for var in bound_args)
+    bound_decls = " ".join(f"({var.name} {_smt_sort(var.domain)})" for var in bound_args)
     quantified = f"(exists ({bound_decls}) {all_constraints})"
 
     guard = SMTGuard(tuple(arguments), Template(quantified))
@@ -336,7 +348,7 @@ def _handle_vector_plus_arithmetic(vector: ConstantVector, arithmetic: SetCompre
     full_constraint = "(and " + " ".join(parts_filtered) + ")"
 
     # Wrap in existential quantifier over bound variables
-    bound_decls = " ".join(f"({_smt_sort(arg.domain)} {var.name})" for var, arg in zip(bound_arguments, arithmetic.members))
+    bound_decls = " ".join(f"({var.name} {_smt_sort(arg.domain)})" for var, arg in zip(bound_arguments, arithmetic.members))
     quantified = f"(exists ({bound_decls}) {full_constraint})"
 
     guard = SMTGuard(tuple(arguments), Template(quantified))
@@ -383,8 +395,8 @@ def _handle_arithmetic_plus_arithmetic(
     all_constraints = "(and " + " ".join(constraints_filtered) + ")"
 
     # Quantify existentially over both bound‐var lists
-    bound_decls1 = " ".join(f"({_smt_sort(var.domain)} {var.name})" for var in bound_args1)
-    bound_decls2 = " ".join(f"({_smt_sort(var.domain)} {var.name})" for var in bound_args2)
+    bound_decls1 = " ".join(f"({var.name} {_smt_sort(var.domain)})" for var in bound_args1)
+    bound_decls2 = " ".join(f"({var.name} {_smt_sort(var.domain)})" for var in bound_args2)
     quantified = f"(exists ({bound_decls1} {bound_decls2}) {all_constraints})"
 
     guard = SMTGuard(tuple(arguments), Template(quantified))
@@ -397,13 +409,13 @@ def _handle_arithmetic_plus_arithmetic(
 def _build_smt_exists(base_type: BaseSetType, scalar: str, body: str) -> str:
     match base_type:
         case BaseSetType.INTEGERS:
-            return f"(exists ((Int {scalar})) {body})"
+            return f"(exists (({scalar} Int)) {body})"
         case BaseSetType.NATURALS:
-            return f"(exists ((Int {scalar})) (and (>= {scalar} 0) {body}))"
+            return f"(exists (({scalar} Int)) (and (>= {scalar} 0) {body}))"
         case BaseSetType.POSITIVES:
-            return f"(exists ((Int {scalar})) (and (> {scalar} 0) {body}))"
+            return f"(exists (({scalar} Int)) (and (> {scalar} 0) {body}))"
         case BaseSetType.REALS:
-            return f"(exists ((Real {scalar})) {body})"
+            return f"(exists (({scalar} Real)) {body})"
         case _:
             raise ValueError(f"No domain for type: {base_type}")
 
@@ -458,7 +470,7 @@ def _process_predicate_context(node: ASTNode, scopes: ScopeHandler) -> None:
         _process_definition(child, scopes)
 
 
-def _process_predicate(node: ASTNode, scopes: ScopeHandler) -> Predicate:
+def _process_predicate(node: ASTNode, scopes: ScopeHandler) -> SetExpression:
     assert_node_type(node, NodeType.PREDICATE)
     assert node.child
 
