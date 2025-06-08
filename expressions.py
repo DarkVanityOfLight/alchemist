@@ -109,6 +109,19 @@ class UnionSet(SymbolicSet):
     parts: Tuple[SymbolicSet, ...]
 
 @dataclass(frozen=True)
+class IntersectionSet(SymbolicSet):
+    parts: Tuple[SymbolicSet, ...]
+
+@dataclass(frozen=True)
+class DifferenceSet(SymbolicSet):
+    minuend: SymbolicSet
+    subtrahend: SymbolicSet
+
+@dataclass(frozen=True)
+class ComplementSet(SymbolicSet):
+    complemented_set: SymbolicSet
+
+@dataclass(frozen=True)
 class LinearScale(SymbolicSet):
     factor: Scalar
     scaled_set: SymbolicSet

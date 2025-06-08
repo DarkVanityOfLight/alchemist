@@ -1,11 +1,11 @@
 from __future__ import annotations
-from typing import Callable, Generic, List, Optional, TypeVar, Iterable, Union, Dict, Any
+from typing import Callable, Generic, List, Optional, TypeVar, Iterable, Union, Dict, Any, cast
 from enum import Enum
 from dataclasses import dataclass
 
 from arm_ast import BASE_SET_TYPES, ASTNode, NodeType, ValueType
 from common import assert_children_types, assert_node_type
-from expressions import LinearScale, ProductDomain, Scalar, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
+from expressions import ComplementSet, DifferenceSet, IntersectionSet, LinearScale, ProductDomain, Scalar, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
 from scope_handler import ScopeHandler
 
 T = TypeVar("T")
@@ -293,18 +293,34 @@ class PredicateParser:
             f"- {name}: {error.message}" for name, error in errors
         )
 
-        # Fallback info: use line number and node type if filename is missing
+        # Try to get the most specific line number from the errors
+        most_specific_line = None
+        most_specific_node = None
+        
+        for name, error in errors:
+            if error.node and error.node.line is not None:
+                # Prefer higher line numbers as they're likely more specific
+                if most_specific_line is None or error.node.line > most_specific_line:
+                    most_specific_line = error.node.line
+                    most_specific_node = error.node
+        
+        # Fallback to the input node if no specific error location found
+        if most_specific_line is None:
+            most_specific_line = node.line if node.line is not None else "unknown"
+            most_specific_node = node
+
+        # Build location string
         location_parts = []
-        if node.line is not None:
-            location_parts.append(f"line {node.line}")
-        if node.type is not None:
-            location_parts.append(f"node type {node.type}")
+        if most_specific_line is not None:
+            location_parts.append(f"line {most_specific_line}")
+        if most_specific_node and most_specific_node.type is not None:
+            location_parts.append(f"node type {most_specific_node.type}")
         location = ", ".join(location_parts) if location_parts else "unknown location"
 
         return ParseResult.error_result(ParseError(
             ParseErrorType.STRUCTURAL_ERROR,
             f"All predicate parsers failed ({location}):\n{error_details}",
-            node=node
+            node=most_specific_node or node
         ))
 
 def process_predicate(node: ASTNode, scopes: ScopeHandler):
@@ -338,6 +354,7 @@ def process_predicate(node: ASTNode, scopes: ScopeHandler):
         result = parser.parse(temp_predicate, scopes)
         
         if not result.success:
+            cast(ASTNode, result.get_error().node).print_tree()
             raise ValueError(f"Failed to parse predicate: {result.get_error().message}")
         
         return result.get_value()
@@ -377,7 +394,7 @@ def parse_scaling(node: ASTNode, scopes: ScopeHandler) -> LinearScale:
 
 def parse_shift(node: ASTNode, scopes: ScopeHandler) -> Shift:
     if error := safe_assert_node_type(node, NodeType.PLUS):
-        raise AssertionError(error.message)
+        raise ValueError(error.message)
     
     # Try both operand orders
     for vector_idx, set_idx in [(0, 1), (1, 0)]:
@@ -390,7 +407,7 @@ def parse_shift(node: ASTNode, scopes: ScopeHandler) -> Shift:
             except (ValueError, AssertionError):
                 continue
     
-    raise AssertionError("Could not be parsed as shift")
+    raise ValueError("Could not be parsed as shift")
 
 def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
     # Base Cases
@@ -415,10 +432,18 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
     
     match node.type:
         case NodeType.UNION: return UnionSet(tuple(operands))
-        case NodeType.XOR: pass
-        case NodeType.INTERSECTION: pass
-        case NodeType.DIFFERENCE: pass
-        case NodeType.COMPLEMENT: pass
+        case NodeType.INTERSECTION: return IntersectionSet(tuple(operands))
+        case NodeType.DIFFERENCE:
+            assert len(operands) == 2, f"Can only build a difference of two sets got {len(operands)}"
+            return DifferenceSet(operands[0], operands[1])
+        case NodeType.COMPLEMENT: 
+            assert len(operands) == 1, f"Can only build the complement of one set got {len(operands)}"
+            return ComplementSet(operands[0])
+        case NodeType.XOR:
+            assert len(operands) == 2, f"Can only build a XOR of two sets got {len(operands)}"
+            minuend = UnionSet(tuple(operands))
+            subtrahend = IntersectionSet(tuple(operands))
+            return DifferenceSet(minuend, subtrahend)
         case NodeType.CARTESIAN_PRODUCT: pass
 
     match node.type:
