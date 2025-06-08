@@ -7,6 +7,7 @@ from arm_ast import BASE_SET_TYPES, ASTNode, NodeType, ValueType
 from expressions import Argument, ComplementSet, DifferenceSet, IntersectionSet, LinearScale, ProductDomain, Scalar, SetComprehension, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
 from guards import SimpleGuard
 from scope_handler import ScopeHandler
+from sets import TupleDomain
 
 T = TypeVar("T")
 
@@ -44,7 +45,7 @@ class ParseResult(Generic[T]):
         if not self.success:
             assert self.error
             return self.error
-        raise Exception("The parser did succeed but you called get_error")
+        raise Exception("The parser did not succeed but you called get_error")
 
     def get_value(self) -> T:
         if self.success:
@@ -122,10 +123,10 @@ def try_parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseRes
         # Handle different domain types
         if node.type == NodeType.IDENTIFIER:
             value = scopes.lookup(node.value)
-            if not isinstance(value, SymbolicSet):
+            if not isinstance(value, SymbolicSet) and not isinstance(value, ProductDomain):
                 return ParseResult.error_result(ParseError(
                     ParseErrorType.INVALID_VALUE,
-                    f"Expected SymbolicSet, got {type(value)}",
+                    f"Expected SymbolicSet or ProductDomain, got {type(value)}",
                     node=node
                 ))
             return ParseResult.success_result(value)
@@ -148,17 +149,16 @@ def try_parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseRes
             # Handle nested set comprehensions
             return try_parse_set_comprehension(node, scopes)
         
-        else:
-            # Try to parse as general set expression
-            try:
-                result = parse_set_expression(node, scopes)
-                return ParseResult.success_result(result)
-            except Exception as e:
-                return ParseResult.error_result(ParseError(
-                    ParseErrorType.INVALID_VALUE,
-                    f"Failed to parse domain expression: {e}",
-                    node=node
-                ))
+        # Try to parse as general set expression for all other node types
+        try:
+            result = parse_set_expression(node, scopes)
+            return ParseResult.success_result(result)
+        except Exception as e:
+            return ParseResult.error_result(ParseError(
+                ParseErrorType.INVALID_VALUE,
+                f"Failed to parse domain expression: {e}",
+                node=node
+            ))
                 
     except Exception as e:
         return ParseResult.error_result(ParseError(
@@ -166,8 +166,6 @@ def try_parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseRes
             f"Unexpected error in domain parsing: {e}",
             node=node
         ))
-    finally:
-        assert False, "Unreachable"
 
 def try_parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SetComprehension]:
     """Parse a set comprehension from a SET node - adapted from old parser"""
@@ -269,25 +267,15 @@ def try_parse_scalar(node: ASTNode) -> ParseResult[Scalar]:
         ))
 
 def try_parse_domain(node: ASTNode) -> ParseResult[ProductDomain]:
-    """Parse a domain from a predicate node"""
-    if error := safe_assert_node_type(node, NodeType.PREDICATE):
+    """Parse a domain from a PAREN node containing base set types"""
+    if error := safe_assert_node_type(node, NodeType.PAREN):
         return ParseResult.error_result(error)
     
-    if not node.child:
-        return ParseResult.error_result(ParseError(
-            ParseErrorType.STRUCTURAL_ERROR,
-            "Predicate node must have a child for domain parsing",
-            node=node
-        ))
-    
-    if error := safe_assert_node_type(node.child, NodeType.PAREN):
-        return ParseResult.error_result(error)
-    
-    if error := safe_assert_children_types(node.child, tuple(BASE_SET_TYPES)):
+    if error := safe_assert_children_types(node, tuple(BASE_SET_TYPES)):
         return ParseResult.error_result(error)
     
     try:
-        types = map(domain_from_node_type, (child.type for child in node.child.children))
+        types = map(domain_from_node_type, (child.type for child in node.children))
         return ParseResult.success_result(ProductDomain(tuple(types)))
     except Exception as e:
         return ParseResult.error_result(ParseError(
@@ -297,18 +285,8 @@ def try_parse_domain(node: ASTNode) -> ParseResult[ProductDomain]:
         ))
 
 def try_parse_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
-    """Parse a vector space from a predicate node with specific structure"""
-    if error := safe_assert_node_type(node, NodeType.PREDICATE):
-        return ParseResult.error_result(error)
-    
-    if not node.child:
-        return ParseResult.error_result(ParseError(
-            ParseErrorType.STRUCTURAL_ERROR,
-            "Predicate node must have a child for vector space parsing",
-            node=node
-        ))
-    
-    if error := safe_assert_node_type(node.child, NodeType.PLUS):
+    """Parse a vector space from a PLUS node with MUL children"""
+    if error := safe_assert_node_type(node, NodeType.PLUS):
         return ParseResult.error_result(error)
     
     try:
@@ -328,7 +306,7 @@ def try_parse_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
                     # Recursively process nested PLUS nodes
                     collect_mul_nodes(child)
         
-        collect_mul_nodes(node.child)
+        collect_mul_nodes(node)
         
         if not mul_nodes:
             return ParseResult.error_result(ParseError(
@@ -414,18 +392,8 @@ def try_parse_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
 
 def try_parse_composition(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
     """Parse a composition by delegating to parse_set_expression"""
-    if error := safe_assert_node_type(node, NodeType.PREDICATE):
-        return ParseResult.error_result(error)
-    
-    if not node.child:
-        return ParseResult.error_result(ParseError(
-            ParseErrorType.STRUCTURAL_ERROR,
-            "Predicate node must have a child for composition parsing",
-            node=node
-        ))
-    
     try:
-        result = parse_set_expression(node.child, scopes)
+        result = parse_set_expression(node, scopes)
         return ParseResult.success_result(result)
     except Exception as e:
         return ParseResult.error_result(ParseError(
@@ -442,8 +410,8 @@ class PredicateParser:
         self.parsers = [
             ("vector_space", try_parse_vector_space),
             ("domain", try_parse_domain),
-            ("composition", try_parse_composition),
-            ("comprehension", try_parse_set_comprehension)
+            ("set_comprehension", try_parse_set_comprehension),
+            ("composition", try_parse_composition)
         ]
     
     def parse(self, node: ASTNode, scopes: ScopeHandler) -> ParseResult:
@@ -528,11 +496,8 @@ def process_predicate(node: ASTNode, scopes: ScopeHandler):
         # Use PredicateParser to handle different types of predicates
         parser = PredicateParser()
         
-        # Create a temporary predicate node containing the content
-        temp_predicate = ASTNode(NodeType.PREDICATE, ValueType.EMPTY, None, node.line, node.filename, None, None)
-        temp_predicate.child = predicate_content
-        
-        result = parser.parse(temp_predicate, scopes)
+        # Pass the content node directly to the parser
+        result = parser.parse(predicate_content, scopes)
         
         if not result.success:
             # node.print_tree()
