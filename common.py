@@ -1,7 +1,7 @@
-from typing import Dict
+from typing import Dict, Union, Sequence, Iterable, Optional
 from dataclasses import dataclass
 from enum import Enum
-from arm_ast import ASTNode, BaseSetType
+from arm_ast import ASTNode, BaseSetType, NodeType
 
 @dataclass(frozen=True)
 class Variable:
@@ -18,6 +18,58 @@ def _smt_sort(base_type: BaseSetType) -> str:
         case BaseSetType.POSITIVES:return "Int"
         case BaseSetType.REALS:     return "Real"
         case _: raise ValueError(f"No SMT sort for {base_type}")
+
+def assert_node_type(node: ASTNode, expected: Union[NodeType, Sequence[NodeType]]) -> None:
+    """
+    Ensure a node is of the expected type(s). Raises AssertionError otherwise.
+    """
+    types = (expected,) if not isinstance(expected, Sequence) or isinstance(expected, (str, bytes)) else expected
+    if node.type not in types:
+        raise AssertionError(
+            f"Expected node of type {types}, got {node.type} at line {getattr(node, 'line', '?')}"
+        )
+
+
+def assert_all_node_type(
+    nodes: Iterable[ASTNode], expected: Union[NodeType, Sequence[NodeType]]
+) -> None:
+    """
+    Ensure every node in an iterable is of the expected type(s).
+    """
+    for idx, node in enumerate(nodes):
+        try:
+            assert_node_type(node, expected)
+        except AssertionError as e:
+            raise AssertionError(f"At index {idx}: {e}")
+
+
+def assert_optional_node_type(
+    node: Optional[ASTNode], expected: Union[NodeType, Sequence[NodeType]]
+) -> None:
+    """
+    If node is not None, ensure it's of the expected type(s).
+    """
+    if node is not None:
+        assert_node_type(node, expected)
+
+
+def assert_node_union_type(
+    node: ASTNode, expected: Sequence[NodeType]
+) -> None:
+    """
+    Ensure node type matches one of a union of allowed types.
+    """
+    assert_node_type(node, expected)
+
+
+def assert_children_types(
+    parent: ASTNode, expected: Union[NodeType, Sequence[NodeType]]
+) -> None:
+    """
+    Ensure all child nodes under parent.attr are of expected type(s).
+    """
+    children =parent.children
+    assert_all_node_type(children, expected)
 
 class Namespace(Enum):
     SCALAR = "scalar"
@@ -72,4 +124,7 @@ class UnhandledASTNodeError(Exception):
     def __init__(self, message: str, ast_node: ASTNode) -> None:
         ast_node.print_tree()
         super().__init__(message)
+
+class OutOfScopeError(Exception):
+    pass
 
