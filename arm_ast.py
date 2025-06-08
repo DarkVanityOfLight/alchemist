@@ -78,7 +78,7 @@ ARITHMETIC_OPERATIONS = {
     NodeType.POWER 
 }
 
-class ValueType:
+class ValueType(Enum):
     EMPTY = "CCL_PARSE_TREE_EMPTY"
     INT = "CCL_PARSE_TREE_INT"
     ID = "CCL_PARSE_TREE_ID"

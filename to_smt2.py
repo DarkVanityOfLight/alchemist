@@ -3,7 +3,7 @@ from typing import Callable, Generic, List, Optional, TypeVar, Iterable, Union, 
 from enum import Enum
 from dataclasses import dataclass
 
-from arm_ast import BASE_SET_TYPES, ASTNode, NodeType
+from arm_ast import BASE_SET_TYPES, ASTNode, NodeType, ValueType
 from common import assert_children_types, assert_node_type
 from expressions import LinearScale, ProductDomain, Scalar, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
 from scope_handler import ScopeHandler
@@ -289,10 +289,21 @@ class PredicateParser:
                 )))
         
         # If we get here, all parsers failed
-        error_messages = [f"{name}: {error.message}" for name, error in errors]
+        error_details = "\n".join(
+            f"- {name}: {error.message}" for name, error in errors
+        )
+
+        # Fallback info: use line number and node type if filename is missing
+        location_parts = []
+        if node.line is not None:
+            location_parts.append(f"line {node.line}")
+        if node.type is not None:
+            location_parts.append(f"node type {node.type}")
+        location = ", ".join(location_parts) if location_parts else "unknown location"
+
         return ParseResult.error_result(ParseError(
             ParseErrorType.STRUCTURAL_ERROR,
-            f"All parsers failed. Errors: {'; '.join(error_messages)}",
+            f"All predicate parsers failed ({location}):\n{error_details}",
             node=node
         ))
 
@@ -308,16 +319,28 @@ def process_predicate(node: ASTNode, scopes: ScopeHandler):
     if has_context:
         scopes.enter_scope()
         process_predicate_context(node.child, scopes)
+        
+        # After processing context, the actual predicate content is the next sibling
+        if not node.child.next:
+            raise ValueError("Predicate with context must have content after the context")
+        predicate_content = node.child.next
+    else:
+        predicate_content = node.child
     
     try:
+        # Use PredicateParser to handle different types of predicates
         parser = PredicateParser()
-        result = parser.parse(node, scopes)
+        
+        # Create a temporary predicate node containing the content
+        temp_predicate = ASTNode(NodeType.PREDICATE, ValueType.EMPTY, None, node.line, node.filename, None, None)
+        temp_predicate.child = predicate_content
+        
+        result = parser.parse(temp_predicate, scopes)
         
         if not result.success:
-            node.print_tree()
             raise ValueError(f"Failed to parse predicate: {result.get_error().message}")
         
-        return result.value
+        return result.get_value()
         
     finally:
         if has_context:
@@ -380,24 +403,21 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
         case NodeType.INTEGER: 
             scalar_result = try_parse_scalar(node)
             if scalar_result.success:
-                assert scalar_result.value
-                return scalar_result.value
+                return scalar_result.get_value()
             raise ValueError(f"Failed to parse integer as scalar: {scalar_result.get_error().message}")
         case NodeType.PAREN: 
             vector_result = try_parse_vector(node)
             if vector_result.success:
-                assert vector_result.value
-                return vector_result.value
-
+                return vector_result.get_value()
             raise ValueError(f"Failed to parse parentheses as vector: {vector_result.get_error().message}")
 
     operands = [parse_set_expression(child, scopes) for child in node.children]
     
     match node.type:
         case NodeType.UNION: return UnionSet(tuple(operands))
+        case NodeType.XOR: pass
         case NodeType.INTERSECTION: pass
         case NodeType.DIFFERENCE: pass
-        case NodeType.XOR: pass
         case NodeType.COMPLEMENT: pass
         case NodeType.CARTESIAN_PRODUCT: pass
 
@@ -409,7 +429,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
         case NodeType.MOD: pass
         case NodeType.POWER: pass
 
-    raise ValueError(f"The operand {node.type} is not implemented as composition")
+    raise ValueError(f"The operand {node.type} is not implemented as set expression in line {node.line}")
 
 # Keep existing functions for context processing
 def process_definition(node: ASTNode, scopes: ScopeHandler):
