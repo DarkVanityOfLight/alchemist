@@ -1,35 +1,329 @@
 from __future__ import annotations
-from typing import Callable, List, Optional, TypeVar, Iterable
+from typing import Callable, Generic, List, Optional, TypeVar, Iterable, Union, Dict, Any
+from enum import Enum
+from dataclasses import dataclass
 
 from arm_ast import BASE_SET_TYPES, ASTNode, NodeType
 from common import assert_children_types, assert_node_type
 from expressions import LinearScale, ProductDomain, Scalar, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
 from scope_handler import ScopeHandler
-import inspect
 
-R = TypeVar("R")
+T = TypeVar("T")
 
-def try_parse(node: ASTNode, scopes: ScopeHandler, func: Callable[..., R]) -> Optional[R]:
-    try:
-        sig = inspect.signature(func)
-        params = sig.parameters
-        if len(params) == 1:
-            return func(node)
-        elif len(params) == 2:
-            return func(node, scopes)
-        else:
-            raise TypeError(f"Parser {func.__name__} must take 1 or 2 arguments, got {len(params)}")
-    except AssertionError as e:
-        print(f"Assertion failed in {func.__name__}: {e}")
-        return None
+class ParseErrorType(Enum):
+    WRONG_NODE_TYPE = "wrong_node_type"
+    WRONG_CHILD_COUNT = "wrong_child_count"
+    WRONG_CHILD_TYPE = "wrong_child_type"
+    INVALID_VALUE = "invalid_value"
+    SCOPE_ERROR = "scope_error"
+    STRUCTURAL_ERROR = "structural_error"
 
-def try_parsers(node: ASTNode, scopes: ScopeHandler, parsers: Iterable[Callable[..., R]]) -> Optional[R]:
-    for parser in parsers:
-        result = try_parse(node, scopes, parser)
-        if result is not None:
-            return result
+@dataclass
+class ParseError:
+    error_type: ParseErrorType
+    message: str
+    node: Optional[ASTNode] = None
+    expected: Optional[Any] = None
+    actual: Optional[Any] = None
+
+@dataclass
+class ParseResult(Generic[T]):
+    success: bool
+    value: Optional[T] = None
+    error: Optional[ParseError] = None
+
+    @classmethod
+    def success_result(cls, value: T) -> ParseResult[T]:
+        return cls(success=True, value=value)
+    
+    @classmethod
+    def error_result(cls, error: ParseError) -> ParseResult[Any]:
+        return cls(success=False, error=error)
+
+    def get_error(self) -> ParseError:
+        if not self.success:
+            assert self.error
+            return self.error
+        raise Exception("The parser did succeed but you called get_error")
+
+    def get_value(self) -> T:
+        if self.success:
+            assert self.value
+            return self.value
+        raise Exception("The parser did not succeed but you called get_value")
+
+def safe_assert_node_type(node: ASTNode, expected_type: NodeType) -> Optional[ParseError]:
+    """Returns ParseError if assertion would fail, None if it passes"""
+    if node.type != expected_type:
+        return ParseError(
+            ParseErrorType.WRONG_NODE_TYPE,
+            f"Expected {expected_type}, got {node.type}",
+            node=node,
+            expected=expected_type,
+            actual=node.type
+        )
     return None
 
+def safe_assert_children_types(node: ASTNode, expected_types: tuple) -> Optional[ParseError]:
+    """Returns ParseError if assertion would fail, None if it passes"""
+    if not all(child.type in expected_types for child in node.children):
+        actual_types = [child.type for child in node.children]
+        return ParseError(
+            ParseErrorType.WRONG_CHILD_TYPE,
+            f"Expected children of types {expected_types}, got {actual_types}",
+            node=node,
+            expected=expected_types,
+            actual=actual_types
+        )
+    return None
+
+def try_parse_vector(node: ASTNode) -> ParseResult[Vector]:
+    """Parse a vector from parenthesized integers"""
+    # Check node type
+    if error := safe_assert_node_type(node, NodeType.PAREN):
+        return ParseResult.error_result(error)
+    
+    # Check all children are integers
+    if not all(child.type == NodeType.INTEGER for child in node.children):
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.WRONG_CHILD_TYPE,
+            "All children must be integers for vector parsing",
+            node=node
+        ))
+    
+    try:
+        ints = [child.value for child in node.children]
+        return ParseResult.success_result(Vector(ints))
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Failed to create vector: {e}",
+            node=node
+        ))
+
+def try_parse_scalar(node: ASTNode) -> ParseResult[Scalar]:
+    """Parse a scalar from an integer node"""
+    if error := safe_assert_node_type(node, NodeType.INTEGER):
+        return ParseResult.error_result(error)
+    
+    try:
+        return ParseResult.success_result(Scalar(node.value))
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Failed to create scalar: {e}",
+            node=node
+        ))
+
+def try_parse_domain(node: ASTNode) -> ParseResult[ProductDomain]:
+    """Parse a domain from a predicate node"""
+    if error := safe_assert_node_type(node, NodeType.PREDICATE):
+        return ParseResult.error_result(error)
+    
+    if not node.child:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.STRUCTURAL_ERROR,
+            "Predicate node must have a child for domain parsing",
+            node=node
+        ))
+    
+    if error := safe_assert_node_type(node.child, NodeType.PAREN):
+        return ParseResult.error_result(error)
+    
+    if error := safe_assert_children_types(node.child, tuple(BASE_SET_TYPES)):
+        return ParseResult.error_result(error)
+    
+    try:
+        types = map(domain_from_node_type, (child.type for child in node.child.children))
+        return ParseResult.success_result(ProductDomain(tuple(types)))
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Failed to create domain: {e}",
+            node=node
+        ))
+
+def try_parse_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
+    """Parse a vector space from a predicate node with specific structure"""
+    if error := safe_assert_node_type(node, NodeType.PREDICATE):
+        return ParseResult.error_result(error)
+    
+    if not node.child:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.STRUCTURAL_ERROR,
+            "Predicate node must have a child for vector space parsing",
+            node=node
+        ))
+    
+    if error := safe_assert_node_type(node.child, NodeType.PLUS):
+        return ParseResult.error_result(error)
+    
+    try:
+        sums: List[ASTNode] = flatten(node.child)
+        basis_vecs = []
+        domains: List[NodeType] = []
+        
+        for s in sums:
+            # Filter away PLUS node from children
+            fil = tuple(filter(lambda child: child.type == NodeType.MUL, s.children))
+            if len(fil) < 1:
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.STRUCTURAL_ERROR,
+                    "Expected MUL node in sum",
+                    node=s
+                ))
+            
+            mul = fil[0]
+            if not mul.child:
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.STRUCTURAL_ERROR,
+                    "MUL node must have children",
+                    node=mul
+                ))
+            
+            basis, domain = (mul.child, mul.child.next) if mul.child.type == NodeType.PAREN else (mul.child.next, mul.child)
+            if not basis or not domain:
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.STRUCTURAL_ERROR,
+                    "Could not identify basis and domain in MUL node",
+                    node=mul
+                ))
+            
+            vec_result = try_parse_vector(basis)
+            if not vec_result.success:
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.STRUCTURAL_ERROR,
+                    f"Failed to parse basis vector: {vec_result.get_error().message}",
+                    node=basis
+                ))
+            
+            basis_vecs.append(vec_result.value)
+            domains.append(domain.type)
+        
+        if not all(domain == domains[0] for domain in domains[1:]):
+            return ParseResult.error_result(ParseError(
+                ParseErrorType.STRUCTURAL_ERROR,
+                "All domains must be the same",
+                node=node
+            ))
+        
+        if not basis_vecs:
+            return ParseResult.error_result(ParseError(
+                ParseErrorType.STRUCTURAL_ERROR,
+                "No basis vectors found",
+                node=node
+            ))
+        
+        dim = basis_vecs[0].dimension
+        if not all(v.dimension == dim for v in basis_vecs[1:]):
+            return ParseResult.error_result(ParseError(
+                ParseErrorType.STRUCTURAL_ERROR,
+                "All basis vectors must have the same dimension",
+                node=node
+            ))
+        
+        domain = ProductDomain(tuple(map(domain_from_node_type, [domains[0] for _ in range(dim)])))
+        return ParseResult.success_result(VectorSpace(domain, basis_vecs))
+        
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Failed to create vector space: {e}",
+            node=node
+        ))
+
+def try_parse_composition(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
+    """Parse a composition by delegating to parse_set_expression"""
+    if error := safe_assert_node_type(node, NodeType.PREDICATE):
+        return ParseResult.error_result(error)
+    
+    if not node.child:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.STRUCTURAL_ERROR,
+            "Predicate node must have a child for composition parsing",
+            node=node
+        ))
+    
+    try:
+        result = parse_set_expression(node.child, scopes)
+        return ParseResult.success_result(result)
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Failed to parse composition: {e}",
+            node=node
+        ))
+
+class PredicateParser:
+    """Centralized predicate parser that tries parsers in order"""
+    
+    def __init__(self):
+        # Define parsers in order of preference
+        self.parsers = [
+            ("vector_space", try_parse_vector_space),
+            ("domain", try_parse_domain),
+            ("composition", try_parse_composition),
+        ]
+    
+    def parse(self, node: ASTNode, scopes: ScopeHandler) -> ParseResult:
+        """Try parsers in order until one succeeds"""
+        errors = []
+        
+        for name, parser in self.parsers:
+            try:
+                if parser.__code__.co_argcount == 2:  # Takes scopes parameter
+                    result = parser(node, scopes)
+                else:
+                    result = parser(node)
+                
+                if result.success:
+                    return result
+                else:
+                    errors.append((name, result.error))
+            except Exception as e:
+                # Handle any unexpected exceptions during parsing
+                errors.append((name, ParseError(
+                    ParseErrorType.INVALID_VALUE,
+                    f"Unexpected error in {name}: {e}",
+                    node=node
+                )))
+        
+        # If we get here, all parsers failed
+        error_messages = [f"{name}: {error.message}" for name, error in errors]
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.STRUCTURAL_ERROR,
+            f"All parsers failed. Errors: {'; '.join(error_messages)}",
+            node=node
+        ))
+
+def process_predicate(node: ASTNode, scopes: ScopeHandler):
+    """Main predicate processing function"""
+    if error := safe_assert_node_type(node, NodeType.PREDICATE):
+        raise ValueError(f"Expected PREDICATE node: {error.message}")
+    
+    if not node.child:
+        raise ValueError("Predicate node must have a child")
+    
+    has_context = node.child.type == NodeType.PREDICATE_CONTEXT
+    if has_context:
+        scopes.enter_scope()
+        process_predicate_context(node.child, scopes)
+    
+    try:
+        parser = PredicateParser()
+        result = parser.parse(node, scopes)
+        
+        if not result.success:
+            node.print_tree()
+            raise ValueError(f"Failed to parse predicate: {result.get_error().message}")
+        
+        return result.value
+        
+    finally:
+        if has_context:
+            scopes.exit_scope()
+
+# Keep existing helper functions
 def flatten(node: ASTNode) -> List[ASTNode]:
     typ = node.type
     current = node
@@ -41,88 +335,39 @@ def flatten(node: ASTNode) -> List[ASTNode]:
         current = current.child
     return res
 
-
-def as_vector(node: ASTNode) -> Vector:
-    assert_node_type(node, NodeType.PAREN)
-    assert all(child.type == NodeType.INTEGER for child in node.children)
-    ints = [child.value for child in node]
-    return Vector(ints)
-
-
-def as_vector_space(node: ASTNode) -> VectorSpace:
-    assert_node_type(node, NodeType.PREDICATE)
-    assert node.child is not None
-    assert_node_type(node.child, NodeType.PLUS)
-
-    sums: List[ASTNode] = flatten(node.child)
-    basis_vecs = []
-    domains: List[NodeType] = []
-    for s in sums:
-        # Filter away PLUS node from children
-        fil = tuple(filter(lambda child: child.type == NodeType.MUL, s.children))
-        assert len(fil) >= 1
-        mul = fil[0]
-        assert mul.child
-        basis, domain = (mul.child, mul.child.next) if mul.child.type == NodeType.PAREN else (mul.child.next, mul.child)
-        assert basis and domain
-        vec = as_vector(basis)
-        basis_vecs.append(vec)
-        domains.append(domain.type)
-
-    assert all(domain == domains[0] for domain in domains[1:]), "Domains are not all the same"
-
-    dim = basis_vecs[0].dimension
-    assert all(v.dimension == dim for v in basis_vecs[1:]), "Basis vectors must have the same dimension"
-
-    domain = ProductDomain(tuple(map(domain_from_node_type, [domains[0] for _ in range(dim)])))
-    return VectorSpace(domain, basis_vecs)
-
-def as_domain(node: ASTNode):
-    assert_node_type(node, NodeType.PREDICATE)
-    assert node.child
-    assert_node_type(node.child, NodeType.PAREN)
-    assert_children_types(node.child, tuple(BASE_SET_TYPES))
-
-    types = map(domain_from_node_type, (child.type for child in node.child.children))
-    return ProductDomain(tuple(types))
-
-def as_scalar(node: ASTNode) -> Scalar:
-    assert_node_type(node, NodeType.INTEGER)
-    return Scalar(node.value)
-
-def as_composition(node: ASTNode, scopes: ScopeHandler):
-    assert_node_type(node, NodeType.PREDICATE)
-    assert node.child, "No child"
-    return parse_set_expression(node.child, scopes)
-
-
 def parse_scaling(node: ASTNode, scopes: ScopeHandler) -> LinearScale:
-    assert_node_type(node, NodeType.MUL)
-
+    if error := safe_assert_node_type(node, NodeType.MUL):
+        raise AssertionError(error.message)
+    
     # Try both operand orders
     for scalar_idx, set_idx in [(0, 1), (1, 0)]:
-        try:
-            scalar = as_scalar(node.children[scalar_idx])
-            base_set = parse_set_expression(node.children[set_idx], scopes)
-            return LinearScale(scalar, base_set)
-        except (ValueError, AssertionError):
-            continue
-
-    assert False, "Could not be parsed as scale"
+        scalar_result = try_parse_scalar(node.children[scalar_idx])
+        if scalar_result.success:
+            assert scalar_result.value
+            try:
+                base_set = parse_set_expression(node.children[set_idx], scopes)
+                return LinearScale(scalar_result.value, base_set)
+            except (ValueError, AssertionError):
+                continue
+    
+    raise AssertionError("Could not be parsed as scale")
 
 def parse_shift(node: ASTNode, scopes: ScopeHandler) -> Shift:
-    assert_node_type(node, NodeType.PLUS)
-
+    if error := safe_assert_node_type(node, NodeType.PLUS):
+        raise AssertionError(error.message)
+    
     # Try both operand orders
-    for scalar_idx, set_idx in [(0, 1), (1, 0)]:
-        try:
-            vector = as_vector(node.children[scalar_idx])
-            base_set = parse_set_expression(node.children[set_idx], scopes)
-            return Shift(vector, base_set)
-        except (ValueError, AssertionError):
-            continue
-
-    assert False, "Could not be parsed as scale"
+    for vector_idx, set_idx in [(0, 1), (1, 0)]:
+        vector_result = try_parse_vector(node.children[vector_idx])
+        if vector_result.success:
+            assert vector_result.value
+            try:
+                base_set = parse_set_expression(node.children[set_idx], scopes)
+                return Shift(vector_result.value, base_set)
+            except (ValueError, AssertionError):
+                continue
+    
+    raise AssertionError("Could not be parsed as shift")
 
 def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
     # Base Cases
@@ -132,13 +377,22 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
             if not isinstance(value, SymbolicSet):
                 raise ValueError(f"Wanted symbolic set got: {value} in expression {node} at line {node.line}")
             return value
-        case NodeType.INTEGER: return Scalar(node.value)
-        case NodeType.PAREN: return as_vector(node)
+        case NodeType.INTEGER: 
+            scalar_result = try_parse_scalar(node)
+            if scalar_result.success:
+                assert scalar_result.value
+                return scalar_result.value
+            raise ValueError(f"Failed to parse integer as scalar: {scalar_result.get_error().message}")
+        case NodeType.PAREN: 
+            vector_result = try_parse_vector(node)
+            if vector_result.success:
+                assert vector_result.value
+                return vector_result.value
 
+            raise ValueError(f"Failed to parse parentheses as vector: {vector_result.get_error().message}")
 
-    operands : map[SymbolicSet]= map(lambda child: parse_set_expression(child, scopes), node.children)
-    assert all(isinstance(op, SymbolicSet) for op in operands), "All operands must be of type SymbolicSet"
-
+    operands = [parse_set_expression(child, scopes) for child in node.children]
+    
     match node.type:
         case NodeType.UNION: return UnionSet(tuple(operands))
         case NodeType.INTERSECTION: pass
@@ -155,53 +409,38 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
         case NodeType.MOD: pass
         case NodeType.POWER: pass
 
-    assert False, f"The operand {node.type} is not implemented as composition"
+    raise ValueError(f"The operand {node.type} is not implemented as composition")
 
-
-
+# Keep existing functions for context processing
 def process_definition(node: ASTNode, scopes: ScopeHandler):
-    assert_node_type(node, NodeType.DEFINITION)
-    assert node.child and node.child.next
-
+    if error := safe_assert_node_type(node, NodeType.DEFINITION):
+        raise ValueError(error.message)
+    
+    if not (node.child and node.child.next):
+        raise ValueError("Definition node must have identifier and value children")
+    
     ident = node.child.value
     value = process_predicate(node.child.next, scopes)
     scopes.add_definition(ident, value)
 
 def process_predicate_context(node: ASTNode, scopes: ScopeHandler):
-    assert_node_type(node, NodeType.PREDICATE_CONTEXT)
+    if error := safe_assert_node_type(node, NodeType.PREDICATE_CONTEXT):
+        raise ValueError(error.message)
+    
     for child in node:
-        assert_node_type(child, NodeType.DEFINITION)
+        if error := safe_assert_node_type(child, NodeType.DEFINITION):
+            raise ValueError(error.message)
         process_definition(child, scopes)
 
-def process_predicate(node: ASTNode, scopes: ScopeHandler):
-    assert_node_type(node, NodeType.PREDICATE)
-    assert node.child
-
-    has_context = node.child.type == NodeType.PREDICATE_CONTEXT
-    if has_context:
-        scopes.enter_scope()
-        process_predicate_context(node.child, scopes)
-
-    parsers = [as_vector_space, as_domain, as_composition]
-
-    predicate = try_parsers(node, scopes, parsers)
-
-
-    if has_context:
-        scopes.exit_scope()
-
-    if not predicate:
-        node.print_tree()
-        raise ValueError(f"Unkown predicate")
-
-    return predicate
-
-
 def convert(ast: ASTNode):
-    assert ast.child
-
-    assert_node_type(ast, NodeType.PREDICATE)
-    assert_node_type(ast.child, NodeType.PREDICATE_CONTEXT)
-
+    if not ast.child:
+        raise ValueError("AST root must have a child")
+    
+    if error := safe_assert_node_type(ast, NodeType.PREDICATE):
+        raise ValueError(error.message)
+    
+    if error := safe_assert_node_type(ast.child, NodeType.PREDICATE_CONTEXT):
+        raise ValueError(error.message)
+    
     result = process_predicate(ast, ScopeHandler())
     return result
