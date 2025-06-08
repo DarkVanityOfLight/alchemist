@@ -10,6 +10,7 @@ from sets import SetComprehension
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sets import SetExpression
+    from expressions import Argument
 
 class Guard(ABC):
     """
@@ -21,8 +22,9 @@ class Guard(ABC):
     def realize_constraints(self, args: Tuple[str, ...]) -> Optional[str]:
         pass
 
+
 class SimpleGuard(Guard):
-    def __init__(self, node: ASTNode, variables: Tuple[Variable, ...]) -> None:
+    def __init__(self, node: ASTNode, variables: Tuple[Argument, ...]) -> None:
         self.node = node
         self.variables = variables
         # Map each variable-name to its index so that IDENTIFIER → args[index]
@@ -33,7 +35,7 @@ class SimpleGuard(Guard):
     
     def realize_constraints(self, args: Tuple[str, ...]) -> str:
         # (we still reject Real‐typed domains for now)
-        if any(var.domain == "Real" for var in self.variables):
+        if any(var.type == "Real" for var in self.variables):
             raise NotImplementedError("Real variables not supported yet")
         # Pass the raw args tuple; we’ll index into it by position
         return self._convert_node(self.node, args)

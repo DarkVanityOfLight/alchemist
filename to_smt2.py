@@ -1,11 +1,11 @@
 from __future__ import annotations
-from typing import Callable, Generic, List, Optional, TypeVar, Iterable, Union, Dict, Any, cast
+from typing import Generic, List, Optional, Tuple, TypeVar, Any, cast
 from enum import Enum
 from dataclasses import dataclass
 
 from arm_ast import BASE_SET_TYPES, ASTNode, NodeType, ValueType
-from common import assert_children_types, assert_node_type
-from expressions import ComplementSet, DifferenceSet, IntersectionSet, LinearScale, ProductDomain, Scalar, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
+from expressions import Argument, ComplementSet, DifferenceSet, IntersectionSet, LinearScale, ProductDomain, Scalar, SetComprehension, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
+from guards import SimpleGuard
 from scope_handler import ScopeHandler
 
 T = TypeVar("T")
@@ -101,6 +101,159 @@ def try_parse_vector(node: ASTNode) -> ParseResult[Vector]:
             node=node
         ))
 
+def parse_argument_vector(vector_node: ASTNode) -> ParseResult[Tuple[str, ...]]:
+    """Extract member names from a vector node"""
+    if error := safe_assert_node_type(vector_node, NodeType.VECTOR):
+        return ParseResult.error_result(error)
+    
+    try:
+        member_names = tuple(child.value for child in vector_node.children)
+        return ParseResult.success_result(member_names)
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Failed to extract vector members: {e}",
+            node=vector_node
+        ))
+
+def try_parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SetComprehension]:
+    """Parse domain expressions with error handling"""
+    try:
+        # Handle different domain types
+        if node.type == NodeType.IDENTIFIER:
+            value = scopes.lookup(node.value)
+            if not isinstance(value, SymbolicSet):
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.INVALID_VALUE,
+                    f"Expected SymbolicSet, got {type(value)}",
+                    node=node
+                ))
+            return ParseResult.success_result(value)
+        
+        elif node.type == NodeType.PAREN:
+            # Handle tuple domains like (INTEGERS, NATURALS)
+            if all(child.type in BASE_SET_TYPES for child in node.children):
+                try:
+                    types = tuple(domain_from_node_type(child.type) for child in node.children)
+                    domain = ProductDomain(types)
+                    return ParseResult.success_result(domain)
+                except Exception as e:
+                    return ParseResult.error_result(ParseError(
+                        ParseErrorType.INVALID_VALUE,
+                        f"Failed to create product domain: {e}",
+                        node=node
+                    ))
+        
+        elif node.type == NodeType.SET:
+            # Handle nested set comprehensions
+            return try_parse_set_comprehension(node, scopes)
+        
+        else:
+            # Try to parse as general set expression
+            try:
+                result = parse_set_expression(node, scopes)
+                return ParseResult.success_result(result)
+            except Exception as e:
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.INVALID_VALUE,
+                    f"Failed to parse domain expression: {e}",
+                    node=node
+                ))
+                
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Unexpected error in domain parsing: {e}",
+            node=node
+        ))
+    finally:
+        assert False, "Unreachable"
+
+def try_parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SetComprehension]:
+    """Parse a set comprehension from a SET node - adapted from old parser"""
+    if error := safe_assert_node_type(node, NodeType.SET):
+        return ParseResult.error_result(error)
+    
+    # Check for IN node as first child
+    if not node.child or node.child.type != NodeType.IN:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.STRUCTURAL_ERROR,
+            "Set comprehension must start with IN clause",
+            node=node
+        ))
+    
+    arguments_in_domain = node.child
+    
+    # Validate IN node structure
+    if not (arguments_in_domain.child and arguments_in_domain.child.next):
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.STRUCTURAL_ERROR,
+            "IN clause must have member names and domain expression",
+            node=arguments_in_domain
+        ))
+    
+    # Check for guard clause
+    if not arguments_in_domain.next:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.STRUCTURAL_ERROR,
+            "Set comprehension must have a guard clause after IN",
+            node=arguments_in_domain
+        ))
+    
+    try:
+        # Extract member names from the left side of IN
+        member_names_result = parse_argument_vector(arguments_in_domain.child)
+        if not member_names_result.success:
+            return ParseResult.error_result(member_names_result.get_error())
+        
+        member_names = member_names_result.get_value()
+        
+        # Parse domain expression from the right side of IN
+        domain_result = try_parse_domain_expression(arguments_in_domain.child.next, scopes)
+        if not domain_result.success:
+            return ParseResult.error_result(domain_result.get_error())
+        
+        domain_expr = domain_result.get_value()
+        
+        # Create member variables based on domain type
+        if isinstance(domain_expr, ProductDomain):
+            if len(member_names) != len(domain_expr.types):
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.STRUCTURAL_ERROR,
+                    f"Number of member names ({len(member_names)}) doesn't match domain dimension ({len(domain_expr.types)})",
+                    node=arguments_in_domain.child
+                ))
+            arguments = tuple(
+                Argument(name, typ) for name, typ in zip(member_names, domain_expr.types)
+            )
+        elif isinstance(domain_expr, SetComprehension):
+            # For nested set comprehensions, create variables with appropriate types
+            if len(member_names) != len(domain_expr.arguments):
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.STRUCTURAL_ERROR,
+                    f"Number of member names ({len(member_names)}) doesn't match nested comprehension dimension ({len(domain_expr.arguments)})",
+                    node=arguments_in_domain.child
+                ))
+            arguments = tuple(
+                Argument(name, "Inferred") for name, var in zip(member_names, domain_expr.arguments)
+            )
+        else:
+            # Default to integers for other domain types
+            arguments = tuple(Argument(name, "Inferred") for name in member_names)
+        
+        # Parse guard expression
+        guard_node = arguments_in_domain.next
+        guard = SimpleGuard(guard_node, arguments)
+        
+        return ParseResult.success_result(SetComprehension(arguments, domain_expr, guard))
+        
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Failed to create set comprehension: {e}",
+            node=node
+        ))
+
 def try_parse_scalar(node: ASTNode) -> ParseResult[Scalar]:
     """Parse a scalar from an integer node"""
     if error := safe_assert_node_type(node, NodeType.INTEGER):
@@ -159,54 +312,79 @@ def try_parse_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
         return ParseResult.error_result(error)
     
     try:
-        sums: List[ASTNode] = flatten(node.child)
-        basis_vecs = []
-        domains: List[NodeType] = []
+        # Collect all MUL nodes from the nested PLUS structure
+        mul_nodes = []
         
-        for s in sums:
-            # Filter away PLUS node from children
-            fil = tuple(filter(lambda child: child.type == NodeType.MUL, s.children))
-            if len(fil) < 1:
-                return ParseResult.error_result(ParseError(
-                    ParseErrorType.STRUCTURAL_ERROR,
-                    "Expected MUL node in sum",
-                    node=s
-                ))
+        def collect_mul_nodes(plus_node: ASTNode):
+            """Recursively collect MUL nodes from nested PLUS structure"""
+            if plus_node.type != NodeType.PLUS:
+                return
             
-            mul = fil[0]
-            if not mul.child:
+            # Check direct children for MUL nodes
+            for child in plus_node.children:
+                if child.type == NodeType.MUL:
+                    mul_nodes.append(child)
+                elif child.type == NodeType.PLUS:
+                    # Recursively process nested PLUS nodes
+                    collect_mul_nodes(child)
+        
+        collect_mul_nodes(node.child)
+        
+        if not mul_nodes:
+            return ParseResult.error_result(ParseError(
+                ParseErrorType.STRUCTURAL_ERROR,
+                "No MUL nodes found in vector space structure",
+                node=node
+            ))
+        
+        basis_vecs = []
+        domains = []
+        
+        for mul in mul_nodes:
+            if not mul.child or not mul.child.next:
                 return ParseResult.error_result(ParseError(
                     ParseErrorType.STRUCTURAL_ERROR,
-                    "MUL node must have children",
+                    "MUL node must have exactly two children (domain and vector)",
                     node=mul
                 ))
             
-            basis, domain = (mul.child, mul.child.next) if mul.child.type == NodeType.PAREN else (mul.child.next, mul.child)
-            if not basis or not domain:
+            # The children should be domain (INTEGERS) and vector (PAREN)
+            left_child = mul.child
+            right_child = mul.child.next
+            
+            # Determine which is domain and which is vector
+            if left_child.type in BASE_SET_TYPES and right_child.type == NodeType.PAREN:
+                domain_node, vector_node = left_child, right_child
+            elif right_child.type in BASE_SET_TYPES and left_child.type == NodeType.PAREN:
+                domain_node, vector_node = right_child, left_child
+            else:
                 return ParseResult.error_result(ParseError(
                     ParseErrorType.STRUCTURAL_ERROR,
-                    "Could not identify basis and domain in MUL node",
+                    f"MUL node children must be domain type and PAREN, got {left_child.type} and {right_child.type}",
                     node=mul
                 ))
             
-            vec_result = try_parse_vector(basis)
+            # Parse the vector
+            vec_result = try_parse_vector(vector_node)
             if not vec_result.success:
                 return ParseResult.error_result(ParseError(
                     ParseErrorType.STRUCTURAL_ERROR,
                     f"Failed to parse basis vector: {vec_result.get_error().message}",
-                    node=basis
+                    node=vector_node
                 ))
             
-            basis_vecs.append(vec_result.value)
-            domains.append(domain.type)
+            basis_vecs.append(vec_result.get_value())
+            domains.append(domain_node.type)
         
+        # Validate all domains are the same
         if not all(domain == domains[0] for domain in domains[1:]):
             return ParseResult.error_result(ParseError(
                 ParseErrorType.STRUCTURAL_ERROR,
-                "All domains must be the same",
+                f"All domains must be the same, got {domains}",
                 node=node
             ))
         
+        # Validate we have basis vectors
         if not basis_vecs:
             return ParseResult.error_result(ParseError(
                 ParseErrorType.STRUCTURAL_ERROR,
@@ -214,15 +392,17 @@ def try_parse_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
                 node=node
             ))
         
+        # Validate all vectors have the same dimension
         dim = basis_vecs[0].dimension
         if not all(v.dimension == dim for v in basis_vecs[1:]):
             return ParseResult.error_result(ParseError(
                 ParseErrorType.STRUCTURAL_ERROR,
-                "All basis vectors must have the same dimension",
+                f"All basis vectors must have the same dimension, got dimensions {[v.dimension for v in basis_vecs]}",
                 node=node
             ))
         
-        domain = ProductDomain(tuple(map(domain_from_node_type, [domains[0] for _ in range(dim)])))
+        # Create the domain
+        domain = ProductDomain(tuple(domain_from_node_type(domains[0]) for _ in range(dim)))
         return ParseResult.success_result(VectorSpace(domain, basis_vecs))
         
     except Exception as e:
@@ -263,6 +443,7 @@ class PredicateParser:
             ("vector_space", try_parse_vector_space),
             ("domain", try_parse_domain),
             ("composition", try_parse_composition),
+            ("comprehension", try_parse_set_comprehension)
         ]
     
     def parse(self, node: ASTNode, scopes: ScopeHandler) -> ParseResult:
@@ -354,7 +535,7 @@ def process_predicate(node: ASTNode, scopes: ScopeHandler):
         result = parser.parse(temp_predicate, scopes)
         
         if not result.success:
-            cast(ASTNode, result.get_error().node).print_tree()
+            # node.print_tree()
             raise ValueError(f"Failed to parse predicate: {result.get_error().message}")
         
         return result.get_value()
@@ -363,17 +544,24 @@ def process_predicate(node: ASTNode, scopes: ScopeHandler):
         if has_context:
             scopes.exit_scope()
 
-# Keep existing helper functions
-def flatten(node: ASTNode) -> List[ASTNode]:
-    typ = node.type
-    current = node
-    res = []
-    while current is not None and current.type == typ:
-        res.append(current)
-        if current.child is None:
-            break
-        current = current.child
-    return res
+def flatten_plus_nodes(node: ASTNode) -> List[ASTNode]:
+    """
+    Alternative helper function to flatten nested PLUS structure
+    Returns all non-PLUS nodes found in the structure
+    """
+    result = []
+    
+    def traverse(current: ASTNode):
+        if current.type == NodeType.PLUS:
+            # Traverse children of PLUS nodes
+            for child in current.children:
+                traverse(child)
+        else:
+            # Add non-PLUS nodes to result
+            result.append(current)
+    
+    traverse(node)
+    return result
 
 def parse_scaling(node: ASTNode, scopes: ScopeHandler) -> LinearScale:
     if error := safe_assert_node_type(node, NodeType.MUL):
@@ -415,7 +603,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
         case NodeType.IDENTIFIER: 
             value = scopes.lookup(node.value)
             if not isinstance(value, SymbolicSet):
-                raise ValueError(f"Wanted symbolic set got: {value} in expression {node} at line {node.line}")
+                raise ValueError(f"Wanted symbolic set got: {value} in expression {node}")
             return value
         case NodeType.INTEGER: 
             scalar_result = try_parse_scalar(node)
@@ -454,7 +642,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
         case NodeType.MOD: pass
         case NodeType.POWER: pass
 
-    raise ValueError(f"The operand {node.type} is not implemented as set expression in line {node.line}")
+    raise ValueError(f"The operand {node.type} is not implemented as set expression")
 
 # Keep existing functions for context processing
 def process_definition(node: ASTNode, scopes: ScopeHandler):

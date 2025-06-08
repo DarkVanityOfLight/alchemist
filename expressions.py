@@ -1,11 +1,12 @@
 from __future__ import annotations
 from enum import Enum, auto
 from abc import ABC
-from typing import Iterable, Tuple, List
+from typing import Iterable, Literal, Tuple, List
 from dataclasses import dataclass
 
 from arm_ast import ASTNode, NodeType, ValueType
 from common import OutOfScopeError, assert_children_types, assert_node_type
+from guards import Guard
 from scope_handler import ScopeHandler
 
 class OpType(Enum):
@@ -130,6 +131,21 @@ class LinearScale(SymbolicSet):
 class Shift(SymbolicSet):
     shift: Vector
     shifted_set: SymbolicSet
+
+@dataclass(frozen=True)
+class Argument():
+    name: str
+    type: BaseDomain | Literal["Inferred"]
+
+@dataclass(frozen=True)
+class SetComprehension(SymbolicSet):
+    """Adapted SetComprehension class matching the old interface"""
+    arguments: Tuple[Argument, ...]
+    domain: SymbolicSet | ProductDomain
+    guard: Guard
+    
+    def __repr__(self):
+        return f"SetComprehension({self.arguments} IN {self.domain} WHERE {self.guard})"
 
 # This one is a bit special
 # We trust that its expression is in scope
