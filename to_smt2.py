@@ -285,10 +285,75 @@ def try_parse_domain(node: ASTNode) -> ParseResult[ProductDomain]:
         ))
 
 def try_parse_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
-    """Parse a vector space from a PLUS node with MUL children"""
-    if error := safe_assert_node_type(node, NodeType.PLUS):
-        return ParseResult.error_result(error)
+    """Parse a vector space from either a PLUS node (multiple basis vectors) or MUL node (single basis vector)"""
     
+    # Handle single basis vector case (MUL node)
+    if node.type == NodeType.MUL:
+        return _parse_single_basis_vector_space(node)
+    
+    # Handle multiple basis vectors case (PLUS node)
+    if node.type == NodeType.PLUS:
+        return _parse_multi_basis_vector_space(node)
+    
+    return ParseResult.error_result(ParseError(
+        ParseErrorType.WRONG_NODE_TYPE,
+        f"Expected PLUS or MUL node for vector space, got {node.type}",
+        node=node,
+        expected=[NodeType.PLUS, NodeType.MUL],
+        actual=node.type
+    ))
+
+def _parse_single_basis_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
+    """Parse a vector space with a single basis vector from a MUL node"""
+    try:
+        if not node.child or not node.child.next:
+            return ParseResult.error_result(ParseError(
+                ParseErrorType.STRUCTURAL_ERROR,
+                "MUL node must have exactly two children (domain and vector)",
+                node=node
+            ))
+        
+        # The children should be domain (INTEGERS) and vector (PAREN)
+        left_child = node.child
+        right_child = node.child.next
+        
+        # Determine which is domain and which is vector
+        if left_child.type in BASE_SET_TYPES and right_child.type == NodeType.PAREN:
+            domain_node, vector_node = left_child, right_child
+        elif right_child.type in BASE_SET_TYPES and left_child.type == NodeType.PAREN:
+            domain_node, vector_node = right_child, left_child
+        else:
+            return ParseResult.error_result(ParseError(
+                ParseErrorType.STRUCTURAL_ERROR,
+                f"MUL node children must be domain type and PAREN, got {left_child.type} and {right_child.type}",
+                node=node
+            ))
+        
+        # Parse the vector
+        vec_result = try_parse_vector(vector_node)
+        if not vec_result.success:
+            return ParseResult.error_result(ParseError(
+                ParseErrorType.STRUCTURAL_ERROR,
+                f"Failed to parse basis vector: {vec_result.get_error().message}",
+                node=vector_node
+            ))
+        
+        basis_vec = vec_result.get_value()
+        
+        # Create the domain based on vector dimension
+        domain = ProductDomain(tuple(domain_from_node_type(domain_node.type) for _ in range(basis_vec.dimension)))
+        
+        return ParseResult.success_result(VectorSpace(domain, [basis_vec]))
+        
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Failed to create single basis vector space: {e}",
+            node=node
+        ))
+
+def _parse_multi_basis_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
+    """Parse a vector space with multiple basis vectors from a PLUS node with MUL children"""
     try:
         # Collect all MUL nodes from the nested PLUS structure
         mul_nodes = []
