@@ -1,12 +1,13 @@
 from __future__ import annotations
 from enum import Enum, auto
-from abc import ABC
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import itertools
 
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
-    from typing import Literal, Tuple, List
+    from typing import Literal, Tuple, Tuple, Any
     from guards import Guard
 
 from arm_ast import NodeType
@@ -45,7 +46,15 @@ def domain_from_node_type(node_type: NodeType) -> BaseDomain:
         case t: raise ValueError(f"Unknown domain {t}")
 
 @dataclass(frozen=True)
-class ProductDomain():
+class IRNode():
+    id: int = field(default_factory=lambda: next(_global_id_counter), init=False)
+
+    @property
+    @abstractmethod
+    def children(self) -> Tuple[IRNode, ...]: raise NotImplementedError(f"Abstract method children was not implemented for {self}")
+
+@dataclass(frozen=True)
+class ProductDomain(IRNode):
     types: Tuple[BaseDomain, ...]
 
     def __len__(self):
@@ -65,18 +74,26 @@ class ProductDomain():
     def dimension(self) -> int:
         return len(self.types)
 
+    @property
+    def children(self) -> Tuple[IRNode, ...]:
+        return ()
+
 type Domain = BaseDomain | ProductDomain
 
 _global_id_counter = itertools.count(1)
 
 @dataclass(frozen=True)
-class SymbolicSet(ABC):
-    id: int = field(default_factory=lambda: next(_global_id_counter), init=False)
+class SymbolicSet(IRNode):
+    pass
 
 # These value classes can be interpreted as their singelton set
 @dataclass(frozen=True)
 class Vector(SymbolicSet):
     comps: Tuple[int, ...]
+
+    @property
+    def children(self):
+        return ()
 
     def __len__(self):
         return len(self.comps)
@@ -103,50 +120,90 @@ class Scalar(SymbolicSet):
     def dimension(self) -> int:
         return 1
 
+    @property
+    def children(self):
+        return ()
+
 type Value = Vector | Scalar
 
 @dataclass(frozen=True)
 class VectorSpace(SymbolicSet):
     domain: ProductDomain
-    basis: List[Vector]
+    basis: Tuple[Vector]
+
+    @property
+    def children(self) -> Tuple[Vector, ...]:
+        return self.basis
 
 
 @dataclass(frozen=True)
 class UnionSpace:
-    parts: List[VectorSpace]
+    parts: Tuple[VectorSpace]
+
+    @property
+    def children(self) -> Tuple[VectorSpace, ...]:
+        return self.parts
     
 
 @dataclass(frozen=True)
 class FiniteSet(SymbolicSet):
-    members: frozenset
+    members: frozenset[SymbolicSet]
+
+    @property
+    def children(self) -> Tuple[SymbolicSet, ...]:
+        return tuple(self.members)
 
 
 @dataclass(frozen=True)
 class UnionSet(SymbolicSet):
     parts: Tuple[SymbolicSet, ...]
 
+    @property
+    def children(self) -> Tuple[SymbolicSet, ...]:
+        return self.parts
+
 @dataclass(frozen=True)
 class IntersectionSet(SymbolicSet):
     parts: Tuple[SymbolicSet, ...]
+
+    @property
+    def children(self) -> Tuple[SymbolicSet, ...]:
+        return self.parts
 
 @dataclass(frozen=True)
 class DifferenceSet(SymbolicSet):
     minuend: SymbolicSet
     subtrahend: SymbolicSet
 
+    @property
+    def children(self) -> Tuple[SymbolicSet, ...]:
+        return (self.minuend, self.subtrahend)
+
 @dataclass(frozen=True)
 class ComplementSet(SymbolicSet):
     complemented_set: SymbolicSet
+
+    @property
+    def children(self) -> Tuple[SymbolicSet, ...]:
+        return (self.complemented_set,)
 
 @dataclass(frozen=True)
 class LinearScale(SymbolicSet):
     factor: Scalar
     scaled_set: SymbolicSet
 
+    @property
+    def children(self) -> tuple[SymbolicSet, ...]:
+        return (self.scaled_set,)
+
 @dataclass(frozen=True)
 class Shift(SymbolicSet):
     shift: Vector
     shifted_set: SymbolicSet
+
+    @property
+    def children(self) -> tuple[SymbolicSet, ...]:
+        return (self.shifted_set,)
 
 @dataclass(frozen=True)
 class Argument():
@@ -159,6 +216,14 @@ class SetComprehension(SymbolicSet):
     domain: SymbolicSet | ProductDomain
     guard: Guard
     
+    @property
+    def children(self) -> Tuple[IRNode, ...]:
+        from guards import SetGuard
+        if isinstance(self.guard, SetGuard):
+            return (self.domain, self.guard.set_expr)
+        else:
+            return (self.domain,)
+
     def __repr__(self):
         args_repr = ", ".join(
             f"{arg.name}: {arg.type}" if arg.type != "Inferred" else arg.name
@@ -180,3 +245,6 @@ class Identifier(SymbolicSet):
             raise OutOfScopeError(f"The value: {self.name} is not in scope")
         return scope.lookup(self.name)
 
+    @property
+    def children(self) -> Tuple[IRNode, ...]:
+        return ()

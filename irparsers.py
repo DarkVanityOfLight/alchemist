@@ -8,11 +8,12 @@ from expressions import Argument, ComplementSet, DifferenceSet, Identifier, Inte
 from guards import SetGuard, SimpleGuard
 from scope_handler import ScopeHandler
 
+from typing import List, Optional, Tuple, TypeVar, Any, Generic
+T = TypeVar("T")
+
 if typing.TYPE_CHECKING:
-    from typing import Generic, List, Optional, Tuple, TypeVar, Any
     from arm_ast import ASTNode
     from guards import Guard
-    T = TypeVar("T")
 
 class ParseErrorType(Enum):
     WRONG_NODE_TYPE = "wrong_node_type"
@@ -679,7 +680,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
             value = scopes.lookup(node.value)
             if not isinstance(value, SymbolicSet):
                 raise ValueError(f"Wanted symbolic set got: {value} in expression {node}")
-            return Identifier(node.value, value.id)
+            return value
         case NodeType.INTEGER: 
             scalar_result = parse_scalar(node)
             if scalar_result.success:
