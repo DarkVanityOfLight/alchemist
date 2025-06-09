@@ -126,14 +126,7 @@ def parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[
     try:
         # Handle different domain types
         if node.type == NodeType.IDENTIFIER:
-            value = scopes.lookup(node.value)
-            if not isinstance(value, SymbolicSet) and not isinstance(value, ProductDomain):
-                return ParseResult.error_result(ParseError(
-                    ParseErrorType.INVALID_VALUE,
-                    f"Expected SymbolicSet or ProductDomain, got {type(value)}",
-                    node=node
-                ))
-            return ParseResult.success_result(value)
+            return ParseResult.success_result(Identifier(node.value))
         
         elif node.type == NodeType.PAREN:
             # Handle tuple domains like (INTEGERS, NATURALS)
@@ -389,7 +382,7 @@ def _parse_single_basis_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
         # Create the domain based on vector dimension
         domain = ProductDomain(tuple(domain_from_node_type(domain_node.type) for _ in range(basis_vec.dimension)))
         
-        return ParseResult.success_result(VectorSpace(domain, [basis_vec]))
+        return ParseResult.success_result(VectorSpace(domain, (basis_vec,)))
         
     except Exception as e:
         return ParseResult.error_result(ParseError(
@@ -492,7 +485,7 @@ def _parse_multi_basis_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
         
         # Create the domain
         domain = ProductDomain(tuple(domain_from_node_type(domains[0]) for _ in range(dim)))
-        return ParseResult.success_result(VectorSpace(domain, basis_vecs))
+        return ParseResult.success_result(VectorSpace(domain, tuple(basis_vecs)))
         
     except Exception as e:
         return ParseResult.error_result(ParseError(
@@ -677,10 +670,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
     # Base Cases
     match node.type:
         case NodeType.IDENTIFIER: 
-            value = scopes.lookup(node.value)
-            if not isinstance(value, SymbolicSet):
-                raise ValueError(f"Wanted symbolic set got: {value} in expression {node}")
-            return value
+            return Identifier(node.value)
         case NodeType.INTEGER: 
             scalar_result = parse_scalar(node)
             if scalar_result.success:
@@ -729,8 +719,8 @@ def process_definition(node: ASTNode, scopes: ScopeHandler):
         raise ValueError("Definition node must have identifier and value children")
     
     ident = node.child.value
-    value = process_predicate(node.child.next, scopes)
-    scopes.add_definition(ident, value)
+    raw_rhs = node.child.next
+    scopes.add_definition(ident, raw_rhs)
 
 def process_predicate_context(node: ASTNode, scopes: ScopeHandler):
     if error := safe_assert_node_type(node, NodeType.PREDICATE_CONTEXT):

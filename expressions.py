@@ -129,7 +129,7 @@ type Value = Vector | Scalar
 @dataclass(frozen=True)
 class VectorSpace(SymbolicSet):
     domain: ProductDomain
-    basis: Tuple[Vector]
+    basis: Tuple[Vector, ...]
 
     @property
     def children(self) -> Tuple[Vector, ...]:
@@ -237,13 +237,6 @@ class SetComprehension(SymbolicSet):
 @dataclass(frozen=True)
 class Identifier(SymbolicSet):
     name: str
-    target_id: int
-
-    def lookup(self, scope: ScopeHandler):
-        v = scope.lookup(self.name)
-        if not v:
-            raise OutOfScopeError(f"The value: {self.name} is not in scope")
-        return scope.lookup(self.name)
 
     @property
     def children(self) -> Tuple[IRNode, ...]:
