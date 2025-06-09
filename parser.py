@@ -1,6 +1,6 @@
+from ply.lex import LexError
 from arm_ast import ASTNode, ValueType, NodeType
 from ply import yacc
-from lexer import tokens
 
 
 armoise_syntax_tree = None
@@ -309,6 +309,7 @@ def p_term_comparison(p):
     elif p[2] == '>': op = NodeType.GT
     elif p[2] == '<=': op = NodeType.LEQ
     elif p[2] == '>=': op = NodeType.GEQ
+    else: raise LexError("", "")
     p[0] = B_NE(op, p[1], p[3], p.lineno(2))
 
 def p_quantified_formula(p):
@@ -339,6 +340,7 @@ def p_term(p):
         elif p[2] == '*': op = NodeType.MUL
         elif p[2] == '/': op = NodeType.DIV
         elif p[2] == '%': op = NodeType.MOD
+        else: raise LexError("", "")
         p[0] = B_NE(op, p[1], p[3], p.lineno(2))
     elif len(p) == 3:
         if p[1] == '-':
