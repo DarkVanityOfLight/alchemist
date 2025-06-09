@@ -1,14 +1,18 @@
 from __future__ import annotations
 from enum import Enum, auto
 from abc import ABC
-from typing import Iterable, Literal, Tuple, List
 from dataclasses import dataclass, field
 import itertools
 
-from arm_ast import ASTNode, NodeType, ValueType
-from common import OutOfScopeError, assert_children_types, assert_node_type
-from guards import Guard
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from typing import Literal, Tuple, List
+    from guards import Guard
+
+from arm_ast import NodeType
+from common import OutOfScopeError
 from scope_handler import ScopeHandler
+
 
 class OpType(Enum):
     CONST = auto()

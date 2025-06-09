@@ -1,13 +1,18 @@
 from __future__ import annotations
-from typing import Generic, List, Optional, Tuple, TypeVar, Any
 from enum import Enum
 from dataclasses import dataclass
+import typing
 
-from arm_ast import BASE_SET_TYPES, ASTNode, NodeType
+from arm_ast import BASE_SET_TYPES, NodeType
 from expressions import Argument, ComplementSet, DifferenceSet, Identifier, IntersectionSet, LinearScale, ProductDomain, Scalar, SetComprehension, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
-from guards import Guard, SetGuard, SimpleGuard
+from guards import SetGuard, SimpleGuard
 from scope_handler import ScopeHandler
-T = TypeVar("T")
+
+if typing.TYPE_CHECKING:
+    from typing import Generic, List, Optional, Tuple, TypeVar, Any
+    from arm_ast import ASTNode
+    from guards import Guard
+    T = TypeVar("T")
 
 class ParseErrorType(Enum):
     WRONG_NODE_TYPE = "wrong_node_type"
@@ -269,7 +274,7 @@ def try_parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseRes
                     node=arguments_in_domain.child
                 ))
             arguments = tuple(
-                Argument(name, "Inferred") for name, var in zip(member_names, domain_expr.arguments)
+                Argument(name, "Inferred") for name, _ in zip(member_names, domain_expr.arguments)
             )
         else:
             # Default to integers for other domain types
