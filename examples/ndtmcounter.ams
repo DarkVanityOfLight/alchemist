@@ -1,0 +1,31 @@
+let
+  G0 := int * (1, 0, 0) + int * (0, 1, 0);
+  G1 := int * (0, 1, 0);
+  G2 := int * (1, 0, 0);
+  nat3 := (nat, nat, nat);
+  R := 
+    let
+      PCF4_0 := 
+        let
+          CF0 := (1, 0, 0) + G0;
+        in
+          CF0 ^ G1;
+      PCF5_0 := 
+        let
+          CF0 := (1, 0, 0) + G2;
+          CF1 := (0, 0, 0);
+        in
+          CF0 ^ CF1;
+      I_F3_2 := 2 * PCF4_0 || 2 * PCF5_0 + (0, 0, 1);
+      I_F6_2 := 2 * PCF4_0;
+      I_F2_1 := I_F3_2 || I_F6_2 + (0, 1, 0);
+      I_F8_2 := 2 * G0 || 2 * G2 + (0, 0, 1);
+      I_F11_2 := 2 * G0;
+      I_F7_1 := I_F8_2 || I_F11_2 + (0, 1, 0);
+    in
+      I_F2_1 || I_F7_1 + (1, 0, 0);
+in
+  { (start, counter, state) in nat3 | (start, counter, state) in R };
+// Automata size             : #SA=10 #EA=8 #S=18 #D=5 #Refs=15 #to0=4/36
+// Formula size              : 178 nodes
+// Time to synthesis formula : 1 ms

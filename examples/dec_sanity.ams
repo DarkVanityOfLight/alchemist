@@ -1,0 +1,7 @@
+let
+  int3 := (int, int, int);
+  V0 := { (x_src, x_dst, state) in int3 | state = 0 };
+  H0 := { (x_src, x_dst, state) in V0 | -x_src + x_dst <= 0 };
+  nat3 := (nat, nat, nat);
+in
+  { (x_src, x_dst, state) in nat3 | (x_src, x_dst, state) in H0 };

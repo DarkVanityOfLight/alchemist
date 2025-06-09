@@ -1,0 +1,46 @@
+let
+  G0 := int * (1, 0, 0) + int * (0, 1, 0);
+  G1 := int * (1, 0, 0);
+  G2 := int * (1, 1, 0);
+  G3 := int * (3, 1, 0);
+  nat3 := (nat, nat, nat);
+  R := 
+    let
+      PCF7_0 := 
+        let
+          CF0 := (0, 1, 0) + G0;
+          CF1 := (0, 0, 0);
+        in
+          CF0 ^ CF1;
+      I_F6_2 := 2 * PCF7_0 + (0, 0, 1);
+      I_F8_2 := 2 * G0 + (0, 0, 1);
+      I_F5_1 := I_F6_2 || I_F8_2 + (0, 1, 0);
+      I_F10_1 := I_F8_2 || I_F8_2 + (0, 1, 0);
+      I_F4_0 := I_F5_1 || I_F10_1 + (1, 0, 0);
+      PCF11_0 := 
+        let
+          CF0 := 
+            let
+              F0 := (1, 0, 0) + G1;
+              F1 := (1, 1, 0) + G2;
+            in
+              F0 || F1;
+          CF1 := (0, 0, 0);
+        in
+          CF0 ^ CF1;
+      I_F3_2 := 2 * I_F4_0 || 2 * PCF11_0 + (0, 0, 1);
+      I_F13_0 := I_F10_1 || I_F10_1 + (1, 0, 0);
+      PCF14_0 := (2, 0, 0) + G3;
+      I_F12_2 := 2 * I_F13_0 || 2 * PCF14_0 + (0, 0, 1);
+      I_F2_1 := I_F3_2 || I_F12_2 + (0, 1, 0);
+      PCF17_0 := (0, 0, 0);
+      I_F16_2 := 2 * PCF17_0 || 2 * G1 + (0, 0, 1);
+      I_F19_2 := 2 * PCF17_0 || 2 * G2 + (0, 0, 1);
+      I_F15_1 := I_F16_2 || I_F19_2 + (0, 1, 0);
+    in
+      I_F2_1 || I_F15_1 + (1, 0, 0);
+in
+  { (counter, divResult, state) in nat3 | (counter, divResult, state) in R };
+// Automata size             : #SA=22 #EA=13 #S=42 #D=8 #Refs=23 #to0=9/84
+// Formula size              : 315 nodes
+// Time to synthesis formula : 1 ms
