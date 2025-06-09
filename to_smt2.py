@@ -81,7 +81,7 @@ def safe_assert_children_types(node: ASTNode, expected_types: tuple) -> Optional
         )
     return None
 
-def try_parse_vector(node: ASTNode) -> ParseResult[Vector]:
+def parse_vector(node: ASTNode) -> ParseResult[Vector]:
     """Parse a vector from parenthesized integers"""
     # Check node type
     if error := safe_assert_node_type(node, NodeType.PAREN):
@@ -120,7 +120,7 @@ def parse_argument_vector(vector_node: ASTNode) -> ParseResult[Tuple[str, ...]]:
             node=vector_node
         ))
 
-def try_parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SetComprehension]:
+def parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SetComprehension]:
     """Parse domain expressions with error handling"""
     try:
         # Handle different domain types
@@ -150,7 +150,7 @@ def try_parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseRes
         
         elif node.type == NodeType.SET:
             # Handle nested set comprehensions
-            return try_parse_set_comprehension(node, scopes)
+            return parse_set_comprehension(node, scopes)
         
         # Try to parse as general set expression for all other node types
         try:
@@ -170,7 +170,7 @@ def try_parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseRes
             node=node
         ))
 
-def try_parse_guard(node: ASTNode, arguments: Tuple[Argument, ...], scopes: ScopeHandler) -> ParseResult[Guard]:
+def parse_guard(node: ASTNode, arguments: Tuple[Argument, ...], scopes: ScopeHandler) -> ParseResult[Guard]:
     """Parse a guard expression, handling both simple guards and set guards (IN expressions)"""
     try:
         # Check if this is an IN guard (SetGuard)
@@ -208,7 +208,7 @@ def try_parse_guard(node: ASTNode, arguments: Tuple[Argument, ...], scopes: Scop
             node=node
         ))
 
-def try_parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SetComprehension]:
+def parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SetComprehension]:
     """Parse a set comprehension from a SET node"""
     if error := safe_assert_node_type(node, NodeType.SET):
         return ParseResult.error_result(error)
@@ -248,7 +248,7 @@ def try_parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseRes
         member_names = member_names_result.get_value()
         
         # Parse domain expression from the right side of IN
-        domain_result = try_parse_domain_expression(arguments_in_domain.child.next, scopes)
+        domain_result = parse_domain_expression(arguments_in_domain.child.next, scopes)
         if not domain_result.success:
             return ParseResult.error_result(domain_result.get_error())
         
@@ -282,7 +282,7 @@ def try_parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseRes
         
         # Parse guard expression using the enhanced guard parser
         guard_node = arguments_in_domain.next
-        guard_result = try_parse_guard(guard_node, arguments, scopes)
+        guard_result = parse_guard(guard_node, arguments, scopes)
         if not guard_result.success:
             return ParseResult.error_result(guard_result.get_error())
         
@@ -297,7 +297,7 @@ def try_parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseRes
             node=node
         ))
 
-def try_parse_scalar(node: ASTNode) -> ParseResult[Scalar]:
+def parse_scalar(node: ASTNode) -> ParseResult[Scalar]:
     """Parse a scalar from an integer node"""
     if error := safe_assert_node_type(node, NodeType.INTEGER):
         return ParseResult.error_result(error)
@@ -311,7 +311,7 @@ def try_parse_scalar(node: ASTNode) -> ParseResult[Scalar]:
             node=node
         ))
 
-def try_parse_domain(node: ASTNode) -> ParseResult[ProductDomain]:
+def parse_domain(node: ASTNode) -> ParseResult[ProductDomain]:
     """Parse a domain from a PAREN node containing base set types"""
     if error := safe_assert_node_type(node, NodeType.PAREN):
         return ParseResult.error_result(error)
@@ -329,7 +329,7 @@ def try_parse_domain(node: ASTNode) -> ParseResult[ProductDomain]:
             node=node
         ))
 
-def try_parse_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
+def parse_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
     """Parse a vector space from either a PLUS node (multiple basis vectors) or MUL node (single basis vector)"""
     
     # Handle single basis vector case (MUL node)
@@ -375,7 +375,7 @@ def _parse_single_basis_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
             ))
         
         # Parse the vector
-        vec_result = try_parse_vector(vector_node)
+        vec_result = parse_vector(vector_node)
         if not vec_result.success:
             return ParseResult.error_result(ParseError(
                 ParseErrorType.STRUCTURAL_ERROR,
@@ -453,7 +453,7 @@ def _parse_multi_basis_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
                 ))
             
             # Parse the vector
-            vec_result = try_parse_vector(vector_node)
+            vec_result = parse_vector(vector_node)
             if not vec_result.success:
                 return ParseResult.error_result(ParseError(
                     ParseErrorType.STRUCTURAL_ERROR,
@@ -500,7 +500,7 @@ def _parse_multi_basis_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
             node=node
         ))
 
-def try_parse_composition(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
+def parse_composition(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
     """Parse a composition by delegating to parse_set_expression"""
     try:
         result = parse_set_expression(node, scopes)
@@ -518,10 +518,10 @@ class PredicateParser:
     def __init__(self):
         # Define parsers in order of preference
         self.parsers = [
-            ("vector_space", try_parse_vector_space),
-            ("domain", try_parse_domain),
-            ("set_comprehension", try_parse_set_comprehension),
-            ("composition", try_parse_composition)
+            ("vector_space", parse_vector_space),
+            ("domain", parse_domain),
+            ("set_comprehension", parse_set_comprehension),
+            ("composition", parse_composition)
         ]
     
     def parse(self, node: ASTNode, scopes: ScopeHandler) -> ParseResult:
@@ -644,7 +644,7 @@ def parse_scaling(node: ASTNode, scopes: ScopeHandler) -> LinearScale:
     
     # Try both operand orders
     for scalar_idx, set_idx in [(0, 1), (1, 0)]:
-        scalar_result = try_parse_scalar(node.children[scalar_idx])
+        scalar_result = parse_scalar(node.children[scalar_idx])
         if scalar_result.success:
             assert scalar_result.value
             try:
@@ -661,7 +661,7 @@ def parse_shift(node: ASTNode, scopes: ScopeHandler) -> Shift:
     
     # Try both operand orders
     for vector_idx, set_idx in [(0, 1), (1, 0)]:
-        vector_result = try_parse_vector(node.children[vector_idx])
+        vector_result = parse_vector(node.children[vector_idx])
         if vector_result.success:
             assert vector_result.value
             try:
@@ -681,12 +681,12 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
                 raise ValueError(f"Wanted symbolic set got: {value} in expression {node}")
             return Identifier(node.value, value.id)
         case NodeType.INTEGER: 
-            scalar_result = try_parse_scalar(node)
+            scalar_result = parse_scalar(node)
             if scalar_result.success:
                 return scalar_result.get_value()
             raise ValueError(f"Failed to parse integer as scalar: {scalar_result.get_error().message}")
         case NodeType.PAREN: 
-            vector_result = try_parse_vector(node)
+            vector_result = parse_vector(node)
             if vector_result.success:
                 return vector_result.get_value()
             raise ValueError(f"Failed to parse parentheses as vector: {vector_result.get_error().message}")
