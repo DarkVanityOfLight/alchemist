@@ -1,7 +1,7 @@
 from ply.lex import LexError
 from arm_ast import ASTNode, ValueType, NodeType
 from ply import yacc
-
+from lexer import tokens
 
 armoise_syntax_tree = None
 armoise_current_line = 1
