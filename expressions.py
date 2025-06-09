@@ -2,7 +2,8 @@ from __future__ import annotations
 from enum import Enum, auto
 from abc import ABC
 from typing import Iterable, Literal, Tuple, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import itertools
 
 from arm_ast import ASTNode, NodeType, ValueType
 from common import OutOfScopeError, assert_children_types, assert_node_type
@@ -23,6 +24,14 @@ class BaseDomain(Enum):
     REAL = auto()
     POS  = auto()
 
+    def __str__(self):
+        return {
+            BaseDomain.INT:  "ℤ",   # Integers
+            BaseDomain.NAT:  "ℕ",   # Natural numbers
+            BaseDomain.REAL: "ℝ",   # Reals
+            BaseDomain.POS:  "ℕ⁺",  # Positive naturals
+        }[self]
+
 def domain_from_node_type(node_type: NodeType) -> BaseDomain:
     match node_type:
         case NodeType.INTEGERS: return BaseDomain.INT
@@ -42,7 +51,11 @@ class ProductDomain():
         return self.types[i]
 
     def __repr__(self):
-        return f"BaseDomain({self.types})"
+        if len(self.types) == 1:
+            return str(self.types[0])
+        else:
+            inner = " × ".join(str(t) for t in self.types)
+            return f"({inner})"
 
     @property
     def dimension(self) -> int:
@@ -50,17 +63,16 @@ class ProductDomain():
 
 type Domain = BaseDomain | ProductDomain
 
+_global_id_counter = itertools.count(1)
+
 @dataclass(frozen=True)
 class SymbolicSet(ABC):
-    pass
+    id: int = field(default_factory=lambda: next(_global_id_counter), init=False)
 
 # These value classes can be interpreted as their singelton set
 @dataclass(frozen=True)
 class Vector(SymbolicSet):
     comps: Tuple[int, ...]
-
-    def __init__(self, comps: Iterable[int]) -> None:
-        object.__setattr__(self, "comps", tuple(comps))
 
     def __len__(self):
         return len(self.comps)
@@ -139,13 +151,16 @@ class Argument():
 
 @dataclass(frozen=True)
 class SetComprehension(SymbolicSet):
-    """Adapted SetComprehension class matching the old interface"""
     arguments: Tuple[Argument, ...]
     domain: SymbolicSet | ProductDomain
     guard: Guard
     
     def __repr__(self):
-        return f"SetComprehension({self.arguments} IN {self.domain} WHERE {self.guard})"
+        args_repr = ", ".join(
+            f"{arg.name}: {arg.type}" if arg.type != "Inferred" else arg.name
+            for arg in self.arguments
+        )
+        return f"{{ ({args_repr}) ∈ {self.domain} | {self.guard} }}"
 
 # This one is a bit special
 # We trust that its expression is in scope
@@ -153,6 +168,7 @@ class SetComprehension(SymbolicSet):
 @dataclass(frozen=True)
 class Identifier(SymbolicSet):
     name: str
+    target_id: int
 
     def lookup(self, scope: ScopeHandler):
         v = scope.lookup(self.name)

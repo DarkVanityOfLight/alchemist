@@ -9,8 +9,9 @@ from sets import SetComprehension
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from sets import SetExpression
+    from expressions import SymbolicSet
     from expressions import Argument
+
 
 class Guard(ABC):
     """
@@ -70,7 +71,7 @@ class SimpleGuard(Guard):
 
     def _convert_node(self, node: ASTNode, args: Tuple[str, ...]) -> str:
 
-        # IDENTIFIER → look up its index, then pick that arg
+        # IDENTIFIER -> look up its index, then pick that arg
         if node.type == NodeType.IDENTIFIER:
             idx = self._lookup_var_index(node.value)
             return args[idx]
@@ -276,11 +277,11 @@ class SimpleGuard(Guard):
 
     def __repr__(self):
         names = [v.name for v in self.variables]
-        return f"SimpleGuard(variables={names})"
+        return f"SimpleGuard(variables={names}, guardNode={self.node})"
 
 
 class SetGuard(Guard):
-    def __init__(self, arguments: Tuple[Variable, ...], set_expr: SetExpression) -> None:
+    def __init__(self, arguments: Tuple[Argument, ...], set_expr: SymbolicSet) -> None:
         self.arguments = arguments
         self.set_expr = set_expr
         
@@ -291,10 +292,7 @@ class SetGuard(Guard):
             self.arg_to_member_pos = None
 
     def realize_constraints(self, args: Tuple[str, ...]) -> Optional[str]:
-        if self.arg_to_member_pos:
-            reordered_args = tuple(args[i] for i in self.arg_to_member_pos)
-            return self.set_expr.realize_constraints(reordered_args)
-        return self.set_expr.realize_constraints(args)
+        raise NotImplementedError()
 
     def __repr__(self):
         return f"SetGuard(args={[v.name for v in self.arguments]}, expr={repr(self.set_expr)})"

@@ -1,14 +1,12 @@
 from __future__ import annotations
-from typing import Generic, List, Optional, Tuple, TypeVar, Any, cast
+from typing import Generic, List, Optional, Tuple, TypeVar, Any
 from enum import Enum
 from dataclasses import dataclass
 
-from arm_ast import BASE_SET_TYPES, ASTNode, NodeType, ValueType
-from expressions import Argument, ComplementSet, DifferenceSet, IntersectionSet, LinearScale, ProductDomain, Scalar, SetComprehension, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
-from guards import SimpleGuard
+from arm_ast import BASE_SET_TYPES, ASTNode, NodeType
+from expressions import Argument, ComplementSet, DifferenceSet, Identifier, IntersectionSet, LinearScale, ProductDomain, Scalar, SetComprehension, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
+from guards import Guard, SetGuard, SimpleGuard
 from scope_handler import ScopeHandler
-from sets import TupleDomain
-
 T = TypeVar("T")
 
 class ParseErrorType(Enum):
@@ -94,7 +92,7 @@ def try_parse_vector(node: ASTNode) -> ParseResult[Vector]:
     
     try:
         ints = [child.value for child in node.children]
-        return ParseResult.success_result(Vector(ints))
+        return ParseResult.success_result(Vector(tuple(ints)))
     except Exception as e:
         return ParseResult.error_result(ParseError(
             ParseErrorType.INVALID_VALUE,
@@ -167,8 +165,46 @@ def try_parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseRes
             node=node
         ))
 
+def try_parse_guard(node: ASTNode, arguments: Tuple[Argument, ...], scopes: ScopeHandler) -> ParseResult[Guard]:
+    """Parse a guard expression, handling both simple guards and set guards (IN expressions)"""
+    try:
+        # Check if this is an IN guard (SetGuard)
+        if node.type == NodeType.IN:
+            # Structure: IN has left child (vector) and right child (set expression)
+            if not (node.child and node.child.next):
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.STRUCTURAL_ERROR,
+                    "IN node must have vector and set expression children",
+                    node=node
+                ))
+            
+            vec_node = node.child
+            if error := safe_assert_node_type(vec_node, NodeType.VECTOR):
+                return ParseResult.error_result(error)
+            
+            # Parse the set expression on the right side of IN
+            try:
+                set_expr = parse_set_expression(node.child.next, scopes)
+                return ParseResult.success_result(SetGuard(arguments, set_expr))
+            except Exception as e:
+                return ParseResult.error_result(ParseError(
+                    ParseErrorType.INVALID_VALUE,
+                    f"Failed to parse set expression in SetGuard: {e}",
+                    node=node.child.next
+                ))
+        
+        # For all other guard types, create a SimpleGuard
+        return ParseResult.success_result(SimpleGuard(node, arguments))
+        
+    except Exception as e:
+        return ParseResult.error_result(ParseError(
+            ParseErrorType.INVALID_VALUE,
+            f"Failed to parse guard: {e}",
+            node=node
+        ))
+
 def try_parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SetComprehension]:
-    """Parse a set comprehension from a SET node - adapted from old parser"""
+    """Parse a set comprehension from a SET node"""
     if error := safe_assert_node_type(node, NodeType.SET):
         return ParseResult.error_result(error)
     
@@ -239,9 +275,13 @@ def try_parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseRes
             # Default to integers for other domain types
             arguments = tuple(Argument(name, "Inferred") for name in member_names)
         
-        # Parse guard expression
+        # Parse guard expression using the enhanced guard parser
         guard_node = arguments_in_domain.next
-        guard = SimpleGuard(guard_node, arguments)
+        guard_result = try_parse_guard(guard_node, arguments, scopes)
+        if not guard_result.success:
+            return ParseResult.error_result(guard_result.get_error())
+        
+        guard = guard_result.get_value()
         
         return ParseResult.success_result(SetComprehension(arguments, domain_expr, guard))
         
@@ -634,7 +674,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
             value = scopes.lookup(node.value)
             if not isinstance(value, SymbolicSet):
                 raise ValueError(f"Wanted symbolic set got: {value} in expression {node}")
-            return value
+            return Identifier(node.value, value.id)
         case NodeType.INTEGER: 
             scalar_result = try_parse_scalar(node)
             if scalar_result.success:
