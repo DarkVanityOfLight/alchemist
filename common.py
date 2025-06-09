@@ -1,23 +1,23 @@
-from typing import Dict, Union, Sequence, Iterable, Optional
+from typing import Any, Dict, Union, Sequence, Iterable, Optional
 from dataclasses import dataclass
 from enum import Enum
-from arm_ast import ASTNode, BaseSetType, NodeType
+from arm_ast import ASTNode, NodeType
 
-@dataclass(frozen=True)
-class Variable:
-    name: str
-    domain: BaseSetType
+class ParseErrorType(Enum):
+    WRONG_NODE_TYPE = "wrong_node_type"
+    WRONG_CHILD_COUNT = "wrong_child_count"
+    WRONG_CHILD_TYPE = "wrong_child_type"
+    INVALID_VALUE = "invalid_value"
+    SCOPE_ERROR = "scope_error"
+    STRUCTURAL_ERROR = "structural_error"
 
-    def __repr__(self):
-        return f"{self.name}: {self.domain}"
-
-def _smt_sort(base_type: BaseSetType) -> str:
-    match base_type:
-        case BaseSetType.INTEGERS: return "Int"
-        case BaseSetType.NATURALS:  return "Int"
-        case BaseSetType.POSITIVES:return "Int"
-        case BaseSetType.REALS:     return "Real"
-        case _: raise ValueError(f"No SMT sort for {base_type}")
+@dataclass
+class ParseError:
+    error_type: ParseErrorType
+    message: str
+    node: Optional[ASTNode] = None
+    expected: Optional[Any] = None
+    actual: Optional[Any] = None
 
 def assert_node_type(node: ASTNode, expected: Union[NodeType, Sequence[NodeType]]) -> None:
     """
@@ -71,6 +71,32 @@ def assert_children_types(
     children =parent.children
     assert_all_node_type(children, expected)
 
+
+def safe_assert_node_type(node: ASTNode, expected_type: NodeType) -> Optional[ParseError]:
+    """Returns ParseError if assertion would fail, None if it passes"""
+    if node.type != expected_type:
+        return ParseError(
+            ParseErrorType.WRONG_NODE_TYPE,
+            f"Expected {expected_type}, got {node.type}",
+            node=node,
+            expected=expected_type,
+            actual=node.type
+        )
+    return None
+
+def safe_assert_children_types(node: ASTNode, expected_types: tuple) -> Optional[ParseError]:
+    """Returns ParseError if assertion would fail, None if it passes"""
+    if not all(child.type in expected_types for child in node.children):
+        actual_types = [child.type for child in node.children]
+        return ParseError(
+            ParseErrorType.WRONG_CHILD_TYPE,
+            f"Expected children of types {expected_types}, got {actual_types}",
+            node=node,
+            expected=expected_types,
+            actual=actual_types
+        )
+    return None
+
 class Namespace(Enum):
     SCALAR = "scalar"
     VECTOR = "vector"
@@ -79,7 +105,7 @@ class Namespace(Enum):
     ARGUMENT = "argument"
 
 
-class FreshVariableOracle:
+class FreshSymbolOracle:
     """
     Manages counters for different namespaces and produces fresh names
     of the form "<namespace>_<counter>".
@@ -101,7 +127,7 @@ class FreshVariableOracle:
 
 
 # Single, module‐level oracle instance
-_fresh_oracle = FreshVariableOracle()
+_fresh_oracle = FreshSymbolOracle()
 
 
 def fresh_variable(namespace: Namespace) -> str:

@@ -3,7 +3,7 @@ from typing import cast
 from arm_ast import ASTNode
 from lexer import lexer
 from parser import parser, armoise_syntax_tree, armoise_current_filename
-from to_smt import convert
+from to_smt2 import convert
 
 def parse_file(filename):
     global armoise_current_filename
@@ -36,9 +36,13 @@ if __name__ == "__main__":
     # ast.print_tree()
 
     ir = convert(ast)
+    print(ir)
 
-    args = [f"arg{i}" for i in range(ir.dim)]
-    smt_str = ir.realize_constraints(tuple(args))
-
-    print(smt_str)
+    # ir = convert(ast)
+    #
+    # args = [f"arg{i}" for i in range(ir.dim)]
+    # smt_str = ir.realize_constraints(tuple(args))
+    #
+    # print(args)
+    # print(smt_str)
 

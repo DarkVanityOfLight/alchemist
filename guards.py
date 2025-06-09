@@ -3,11 +3,11 @@ from abc import abstractmethod, ABC
 from typing import Tuple, Optional
 from string import Template
 
-from common import Variable
 from arm_ast import ASTNode, NodeType
-from sets import SetComprehension
 
 from typing import TYPE_CHECKING
+
+from expressions import SetComprehension
 if TYPE_CHECKING:
     from expressions import SymbolicSet
     from expressions import Argument
@@ -301,7 +301,7 @@ class SMTGuard(Guard):
     """Internal guard class to directly generate smt guards"""
 
 
-    def __init__(self, variables: Tuple[Variable, ...], template: Template) -> None:
+    def __init__(self, variables: Tuple[Argument, ...], template: Template) -> None:
         self.variables = variables
         # Map each variable-name to its index so that IDENTIFIER → args[index]
         self.var_positions = {var.name: i for i, var in enumerate(variables)}
