@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import typing
 
 from arm_ast import BASE_SET_TYPES, NodeType
-from expressions import Argument, ComplementSet, DifferenceSet, Identifier, IntersectionSet, LinearScale, ProductDomain, Scalar, SetComprehension, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
+from expressions import Argument, ComplementSet, DifferenceSet, IRNode, Identifier, IntersectionSet, LinearScale, ProductDomain, Scalar, SetComprehension, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
 from guards import SetGuard, SimpleGuard
 from scope_handler import ScopeHandler
 
@@ -126,7 +126,9 @@ def parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[
     try:
         # Handle different domain types
         if node.type == NodeType.IDENTIFIER:
-            return ParseResult.success_result(Identifier(node.value))
+            ident_node = scopes.lookup_by_name(node.value)
+            assert isinstance(ident_node, IRNode)
+            return ParseResult.success_result(Identifier(node.value, ident_node.id))
         
         elif node.type == NodeType.PAREN:
             # Handle tuple domains like (INTEGERS, NATURALS)
@@ -670,7 +672,10 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
     # Base Cases
     match node.type:
         case NodeType.IDENTIFIER: 
-            return Identifier(node.value)
+            ident_node = scopes.lookup_by_name(node.value)
+            assert isinstance(ident_node, IRNode)
+            return Identifier(node.value, ident_node.id)
+
         case NodeType.INTEGER: 
             scalar_result = parse_scalar(node)
             if scalar_result.success:
@@ -710,7 +715,6 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
 
     raise ValueError(f"The operand {node.type} is not implemented as set expression")
 
-# Keep existing functions for context processing
 def process_definition(node: ASTNode, scopes: ScopeHandler):
     if error := safe_assert_node_type(node, NodeType.DEFINITION):
         raise ValueError(error.message)
@@ -719,8 +723,8 @@ def process_definition(node: ASTNode, scopes: ScopeHandler):
         raise ValueError("Definition node must have identifier and value children")
     
     ident = node.child.value
-    raw_rhs = node.child.next
-    scopes.add_definition(ident, raw_rhs)
+    value = process_predicate(node.child.next, scopes)
+    scopes.add_definition(ident, value)
 
 def process_predicate_context(node: ASTNode, scopes: ScopeHandler):
     if error := safe_assert_node_type(node, NodeType.PREDICATE_CONTEXT):
@@ -741,5 +745,6 @@ def convert(ast: ASTNode):
     if error := safe_assert_node_type(ast.child, NodeType.PREDICATE_CONTEXT):
         raise ValueError(error.message)
     
-    result = process_predicate(ast, ScopeHandler())
-    return result
+    scope_handler = ScopeHandler()
+    result = process_predicate(ast, scope_handler)
+    return result, scope_handler

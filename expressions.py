@@ -11,8 +11,6 @@ if TYPE_CHECKING:
     from guards import Guard
 
 from arm_ast import NodeType
-from common import OutOfScopeError
-from scope_handler import ScopeHandler
 
 
 class OpType(Enum):
@@ -44,6 +42,8 @@ def domain_from_node_type(node_type: NodeType) -> BaseDomain:
         case NodeType.POSITIVES: return BaseDomain.POS
         case NodeType.NATURALS: return BaseDomain.NAT
         case t: raise ValueError(f"Unknown domain {t}")
+
+_global_id_counter = itertools.count(1)
 
 @dataclass(frozen=True)
 class IRNode():
@@ -79,8 +79,6 @@ class ProductDomain(IRNode):
         return ()
 
 type Domain = BaseDomain | ProductDomain
-
-_global_id_counter = itertools.count(1)
 
 @dataclass(frozen=True)
 class SymbolicSet(IRNode):
@@ -237,6 +235,7 @@ class SetComprehension(SymbolicSet):
 @dataclass(frozen=True)
 class Identifier(SymbolicSet):
     name: str
+    ptr: int # The id this identifier should point to
 
     @property
     def children(self) -> Tuple[IRNode, ...]:
