@@ -1,13 +1,14 @@
 from __future__ import annotations
+from os import wait
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from expressions import (
-    Argument, IRNode, Identifier, VectorSpace, FiniteSet, UnionSet, IntersectionSet,
+    Argument, IRNode, Identifier, ProductDomain, Scalar, UnionSpace, Vector, VectorSpace, FiniteSet, UnionSet, IntersectionSet,
     DifferenceSet, ComplementSet, LinearScale, Shift, SetComprehension
 )
 from collections import Counter
 from dataclasses import dataclass, replace
 
-from guards import SetGuard
+from guards import SetGuard, SimpleGuard
 if TYPE_CHECKING:
     from expressions import SymbolicSet
     from scope_handler import ScopeHandler
@@ -117,6 +118,7 @@ _NODE_RECONSTRUCTORS = {
     LinearScale: lambda node, children: replace(node, scaled_set=children[0]),
     Shift: lambda node, children: replace(node, shifted_set=children[0]),
 }
+
 def inline_mapper(node: IRNode, new_children: List[IRNode], 
                   once_used_ids: set, scopes: ScopeHandler) -> IRNode:
     # Fast path: if no children changed and not an identifier to inline
@@ -184,14 +186,14 @@ class LinearTransform(IRNode):
             child=child
         )
 
-    def apply_scale(self, scale_vec: Tuple[int, ...]) -> "LinearTransform":
+    def apply_scale(self, scale_vec: Tuple[int, ...]) -> LinearTransform:
         if len(scale_vec) != len(self.scales):
             raise ValueError("scale vector must have same length as scales")
         new_scales = tuple(s * sc for s, sc in zip(self.scales, scale_vec))
         new_shifts = tuple(sh * sc for sh, sc in zip(self.shifts, scale_vec))
         return LinearTransform(self.arguments, new_scales, new_shifts, self.child)
 
-    def apply_shift(self, shift_vec: Tuple[int, ...]) -> "LinearTransform":
+    def apply_shift(self, shift_vec: Tuple[int, ...]) -> LinearTransform:
         if len(shift_vec) != len(self.shifts):
             raise ValueError("shift vector must have same length as shifts")
         new_shifts = tuple(sh + delta for sh, delta in zip(self.shifts, shift_vec))
