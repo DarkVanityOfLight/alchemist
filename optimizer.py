@@ -1,16 +1,14 @@
 from __future__ import annotations
-from os import wait
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from expressions import (
     Argument, IRNode, Identifier, ProductDomain, Scalar, UnionSpace, Vector, VectorSpace, FiniteSet, UnionSet, IntersectionSet,
-    DifferenceSet, ComplementSet, LinearScale, Shift, SetComprehension
+    DifferenceSet, ComplementSet, LinearScale, Shift, SetComprehension, SymbolicSet
 )
 from collections import Counter
 from dataclasses import dataclass, replace
 
-from guards import SetGuard, SimpleGuard
+from guards import Guard, SMTGuard, SetGuard, SimpleGuard
 if TYPE_CHECKING:
-    from expressions import SymbolicSet
     from scope_handler import ScopeHandler
 
 
@@ -163,7 +161,7 @@ def inline_mapper(node: IRNode, new_children: List[IRNode],
     return node
 
 @dataclass(frozen=True)
-class LinearTransform(IRNode):
+class LinearTransform(Guard, SymbolicSet):
     arguments: Tuple[Argument, ...]
     scales: Tuple[int, ...]
     shifts: Tuple[int, ...]
@@ -204,6 +202,65 @@ class LinearTransform(IRNode):
         return (self.child,)
 
 
+def push_linear_transform(ltf: LinearTransform) -> IRNode:
+    child = ltf.child
+
+    match child:
+        # Base cases
+        case Identifier():
+            return ltf
+        case VectorSpace():
+            return ltf
+        case UnionSpace():
+            return ltf
+        case FiniteSet():
+            return ltf
+        case SimpleGuard():
+            return ltf
+
+        # Absorption
+        case LinearScale(factor=f, scaled_set=grand_child):
+            return replace(ltf.apply_scale(f.comps), child=grand_child)
+        case Shift(shift=s, shifted_set=grand_child):
+            return replace(ltf.apply_shift(s.comps), child=grand_child)
+
+        # Ignores LTF
+        case ProductDomain() as p:
+            return p
+
+        # Distribute over set operators
+        case UnionSet(parts=p):
+            transformed_parts = [push_linear_transform(replace(ltf, child=part)) for part in p]
+            return UnionSet(parts=tuple(transformed_parts)) #type: ignore
+        case IntersectionSet(parts=p):
+            transformed_parts = [push_linear_transform(replace(ltf, child=part)) for part in p]
+            return IntersectionSet(parts=tuple(transformed_parts)) #type: ignore
+        case DifferenceSet(minuend=m, subtrahend=s):
+            m_trans = push_linear_transform(replace(ltf, child=m))
+            s_trans = push_linear_transform(replace(ltf, child=s))
+            return DifferenceSet(minuend=m_trans, subtrahend=s_trans) #type: ignore
+        case ComplementSet(complemented_set=c):
+            c_trans = push_linear_transform(replace(ltf, child=c))
+            return ComplementSet(complemented_set=c_trans) #type: ignore
+
+        case SetComprehension(arguments=args, domain=d, guard=g):
+            d_trans = push_linear_transform(replace(ltf, child=d))
+            g_trans = push_linear_transform(replace(ltf, child=g))
+            return SetComprehension(args, d_trans, g_trans) #type: ignore
+        case SetGuard(arguments=args, set_expr=n):
+            n_trans = push_linear_transform(replace(ltf, child=n))
+            return SetGuard(arguments=args, set_expr=n_trans)  #type: ignore
+
+        # Unhandled/Shouldn't hit
+        case Vector():
+            raise ValueError("Cannot LTF a scalar")  # FIXME: You probably can
+        case Scalar():
+            raise ValueError("Cannot LTF a scalar")
+        case SMTGuard():
+            raise ValueError("Cannot LTF a SMTGuard")
+
+    raise NotImplementedError(f"Did not implement LTF pushdown for node: {child}")
+
 def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
     usages = fold_ir(ir, scopes, count_identifiers)
     once_used_ids = {id for id, count in usages.items() if count == 1 and scopes.lookup_by_id(id) is not None}
@@ -217,8 +274,15 @@ def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
         result = inline_mapper(node, new_children, once_used_ids, scopes)
         return result
 
-    optimized_tree = map_ir(ir, scopes, mapper)
-    print("Optimization complete")
-    print(optimized_tree)
+    inlined_ir = map_ir(ir, scopes, mapper)
+    print("Inline complete")
+    print(inlined_ir)
 
-    return optimized_tree
+    print("Pushing down LTF")
+    assert isinstance(inlined_ir, SetComprehension)
+    ltf = LinearTransform.identity(inlined_ir.arguments, inlined_ir)
+    ltf_ir = push_linear_transform(ltf)
+
+
+    print(ltf_ir)
+    return ltf_ir

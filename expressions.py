@@ -53,6 +53,12 @@ class IRNode():
     @abstractmethod
     def children(self) -> Tuple[IRNode, ...]: raise NotImplementedError(f"Abstract method children was not implemented for {self}")
 
+    @property
+    @abstractmethod
+    def dimension(self) -> int:
+        pass
+    
+
 @dataclass(frozen=True)
 class ProductDomain(IRNode):
     types: Tuple[BaseDomain, ...]
@@ -124,6 +130,8 @@ class Scalar(SymbolicSet):
 
 type Value = Vector | Scalar
 
+# FIXME: Assert that all the dimensions agree
+
 @dataclass(frozen=True)
 class VectorSpace(SymbolicSet):
     domain: ProductDomain
@@ -133,14 +141,22 @@ class VectorSpace(SymbolicSet):
     def children(self) -> Tuple[Vector, ...]:
         return self.basis
 
+    @property
+    def dimension(self) -> int:
+        return self.domain.dimension
+
 
 @dataclass(frozen=True)
-class UnionSpace:
+class UnionSpace(SymbolicSet):
     parts: Tuple[VectorSpace]
 
     @property
     def children(self) -> Tuple[VectorSpace, ...]:
         return self.parts
+
+    @property
+    def dimension(self) -> int:
+        return self.parts[0].dimension
     
 
 @dataclass(frozen=True)
@@ -151,6 +167,10 @@ class FiniteSet(SymbolicSet):
     def children(self) -> Tuple[SymbolicSet, ...]:
         return tuple(self.members)
 
+    @property
+    def dimension(self) -> int:
+        return tuple(self.members)[0].dimension
+
 
 @dataclass(frozen=True)
 class UnionSet(SymbolicSet):
@@ -160,6 +180,10 @@ class UnionSet(SymbolicSet):
     def children(self) -> Tuple[SymbolicSet, ...]:
         return self.parts
 
+    @property
+    def dimension(self) -> int:
+        return self.parts[0].dimension
+
 @dataclass(frozen=True)
 class IntersectionSet(SymbolicSet):
     parts: Tuple[SymbolicSet, ...]
@@ -167,6 +191,10 @@ class IntersectionSet(SymbolicSet):
     @property
     def children(self) -> Tuple[SymbolicSet, ...]:
         return self.parts
+
+    @property
+    def dimension(self) -> int:
+        return self.parts[0].dimension
 
 @dataclass(frozen=True)
 class DifferenceSet(SymbolicSet):
@@ -177,6 +205,10 @@ class DifferenceSet(SymbolicSet):
     def children(self) -> Tuple[SymbolicSet, ...]:
         return (self.minuend, self.subtrahend)
 
+    @property
+    def dimension(self) -> int:
+        return self.minuend.dimension
+
 @dataclass(frozen=True)
 class ComplementSet(SymbolicSet):
     complemented_set: SymbolicSet
@@ -185,14 +217,26 @@ class ComplementSet(SymbolicSet):
     def children(self) -> Tuple[SymbolicSet, ...]:
         return (self.complemented_set,)
 
+    @property
+    def dimension(self) -> int:
+        return self.complemented_set.dimension
+
 @dataclass(frozen=True)
 class LinearScale(SymbolicSet):
-    factor: Scalar
+    factor: Vector
     scaled_set: SymbolicSet
 
     @property
     def children(self) -> tuple[SymbolicSet, ...]:
         return (self.scaled_set,)
+
+    @classmethod
+    def from_scalar(cls, scalar: Scalar, scaled_set: SymbolicSet):
+        return LinearScale(Vector(tuple([scalar.value for _ in range(scaled_set.dimension)])), scaled_set)
+
+    @property
+    def dimension(self) -> int:
+        return self.scaled_set.dimension
 
 @dataclass(frozen=True)
 class Shift(SymbolicSet):
@@ -202,6 +246,10 @@ class Shift(SymbolicSet):
     @property
     def children(self) -> tuple[SymbolicSet, ...]:
         return (self.shifted_set,)
+
+    @property
+    def dimension(self) -> int:
+        return self.shifted_set.dimension
 
 @dataclass(frozen=True)
 class Argument():
@@ -229,6 +277,10 @@ class SetComprehension(SymbolicSet):
         )
         return f"{{ ({args_repr}) ∈ {self.domain} | {self.guard} }}"
 
+    @property
+    def dimension(self) -> int:
+        return len(self.arguments)
+
 # This one is a bit special
 # We trust that its expression is in scope
 # When being called
@@ -236,7 +288,12 @@ class SetComprehension(SymbolicSet):
 class Identifier(SymbolicSet):
     name: str
     ptr: int # The id this identifier should point to
+    dim: int
 
     @property
     def children(self) -> Tuple[IRNode, ...]:
         return ()
+
+    @property
+    def dimension(self) -> int:
+        return self.dim

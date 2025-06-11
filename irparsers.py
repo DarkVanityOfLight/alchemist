@@ -128,7 +128,7 @@ def parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[
         if node.type == NodeType.IDENTIFIER:
             ident_node = scopes.lookup_by_name(node.value)
             assert isinstance(ident_node, IRNode)
-            return ParseResult.success_result(Identifier(node.value, ident_node.id))
+            return ParseResult.success_result(Identifier(node.value, ident_node.id, ident_node.dimension))
         
         elif node.type == NodeType.PAREN:
             # Handle tuple domains like (INTEGERS, NATURALS)
@@ -645,7 +645,7 @@ def parse_scaling(node: ASTNode, scopes: ScopeHandler) -> LinearScale:
             assert scalar_result.value
             try:
                 base_set = parse_set_expression(node.children[set_idx], scopes)
-                return LinearScale(scalar_result.value, base_set)
+                return LinearScale.from_scalar(scalar_result.value, base_set)
             except (ValueError, AssertionError):
                 continue
     
@@ -674,7 +674,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
         case NodeType.IDENTIFIER: 
             ident_node = scopes.lookup_by_name(node.value)
             assert isinstance(ident_node, IRNode)
-            return Identifier(node.value, ident_node.id)
+            return Identifier(node.value, ident_node.id, ident_node.dimension)
 
         case NodeType.INTEGER: 
             scalar_result = parse_scalar(node)
