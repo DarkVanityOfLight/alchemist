@@ -1,0 +1,222 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from expressions import (
+    Argument, IRNode, Identifier, VectorSpace, FiniteSet, UnionSet, IntersectionSet,
+    DifferenceSet, ComplementSet, LinearScale, Shift, SetComprehension
+)
+from collections import Counter
+from dataclasses import dataclass, replace
+
+from guards import SetGuard
+if TYPE_CHECKING:
+    from expressions import SymbolicSet
+    from scope_handler import ScopeHandler
+
+
+_semantic_children_cache = {}
+
+def semantic_children(node: IRNode, scopes: ScopeHandler) -> Tuple[IRNode, ...]:
+    """Get the semantic children of a node, resolving identifiers through scopes."""
+    # Use node id and a simple cache key
+    cache_key = (id(node), type(node).__name__)
+    
+    if cache_key in _semantic_children_cache:
+        cached_result = _semantic_children_cache[cache_key]
+        # For Identifier nodes, we still need to do the lookup since scope might change
+        if not isinstance(node, Identifier):
+            return cached_result
+    
+    if isinstance(node, Identifier):
+        sbtree = scopes.lookup_by_id(node.ptr)
+        result = (sbtree,) if sbtree else ()
+    elif isinstance(node, SetComprehension):
+        # Include domain and set expression from SetGuard if present
+        children = [node.domain]
+        if isinstance(node.guard, SetGuard) and node.guard.set_expr is not None:
+            children.append(node.guard.set_expr)
+        result = tuple(children)
+    else:
+        result = node.children
+    
+    # Cache non-Identifier results
+    if not isinstance(node, Identifier):
+        _semantic_children_cache[cache_key] = result
+    
+    return result
+
+
+def fold_ir(node: IRNode,
+            scopes: ScopeHandler,
+            fn: Callable[[IRNode, Tuple[Any, ...]], Any],
+            memo: Optional[Dict[int, Any]] = None
+           ) -> Any:
+    if memo is None:
+        memo = {}
+    key = id(node)
+    if key in memo:
+        return memo[key]
+
+    kids = semantic_children(node, scopes)
+    child_vals = tuple(fold_ir(ch, scopes, fn, memo) for ch in kids)
+    result = fn(node, child_vals)
+    memo[key] = result
+    return result
+
+
+def map_ir(node: IRNode,
+           scopes: ScopeHandler,
+           fn: Callable[[IRNode, List[IRNode]], IRNode],
+           memo: Optional[Dict[int, IRNode]] = None
+          ) -> IRNode:
+    if memo is None:
+        memo = {}
+    key = id(node)
+    if key in memo:
+        return memo[key]
+
+    kids: Tuple[IRNode, ...] = semantic_children(node, scopes)
+    new_kids: List[IRNode] = [map_ir(ch, scopes, fn, memo) for ch in kids]
+
+    # Apply the transformation function to get the result
+    result = fn(node, new_kids)
+    memo[key] = result
+    
+    # Return the transformed result (don't short-circuit based on identity)
+    return result
+
+
+def count_identifiers(node: IRNode, child_counts: Tuple[Counter, ...]) -> Counter:
+    """
+    Count identifier usage in the IR tree by ID.
+    
+    Args:
+        node: Current IRNode
+        child_counts: Counters from child nodes
+    
+    Returns:
+        Counter with identifier ID usage counts
+    """
+    # merge all child counters
+    total = Counter()
+    for cnt in child_counts:
+        total.update(cnt)
+    
+    # if this node is an Identifier, increment its ID
+    if isinstance(node, Identifier):
+        total[node.ptr] += 1
+    
+    return total
+
+_NODE_RECONSTRUCTORS = {
+    VectorSpace: lambda node, children: replace(node, basis=tuple(children)),
+    FiniteSet: lambda node, children: replace(node, members=frozenset(children)),
+    UnionSet: lambda node, children: replace(node, parts=tuple(children)),
+    IntersectionSet: lambda node, children: replace(node, parts=tuple(children)),
+    DifferenceSet: lambda node, children: replace(node, minuend=children[0], subtrahend=children[1]),
+    ComplementSet: lambda node, children: replace(node, complemented_set=children[0]),
+    LinearScale: lambda node, children: replace(node, scaled_set=children[0]),
+    Shift: lambda node, children: replace(node, shifted_set=children[0]),
+}
+def inline_mapper(node: IRNode, new_children: List[IRNode], 
+                  once_used_ids: set, scopes: ScopeHandler) -> IRNode:
+    # Fast path: if no children changed and not an identifier to inline
+    if (not new_children or tuple(new_children) == node.children) and \
+       not (isinstance(node, Identifier) and node.ptr in once_used_ids):
+        return node
+    
+    # Inline identifiers used exactly once
+    if isinstance(node, Identifier) and node.ptr in once_used_ids:
+        definition = scopes.lookup_by_id(node.ptr)
+        if definition:
+            def recursive_mapper(inner_node: IRNode, inner_children: List[IRNode]) -> IRNode:
+                return inline_mapper(inner_node, inner_children, once_used_ids, scopes)
+            return map_ir(definition, scopes, recursive_mapper)
+        return node
+    
+    # Handle reconstruction for SetComprehension with updated domain AND guard
+    if isinstance(node, SetComprehension):
+        new_domain = new_children[0] if new_children else node.domain
+        new_guard = node.guard
+        
+        # Update guard expression if it exists
+        if isinstance(node.guard, SetGuard) and node.guard.set_expr is not None:
+            if len(new_children) > 1:
+                new_guard = replace(node.guard, set_expr=new_children[1])
+            else:
+                new_guard = replace(node.guard, set_expr=None)
+        
+        return replace(node, domain=new_domain, guard=new_guard)
+    
+    # Handle reconstruction for SetGuard nodes directly
+    if isinstance(node, SetGuard) and node.set_expr is not None:
+        if new_children:
+            return replace(node, set_expr=new_children[0])
+        return node
+
+    # Use pre-compiled reconstructors for faster dispatch
+    node_type = type(node)
+    if node_type in _NODE_RECONSTRUCTORS:
+        return _NODE_RECONSTRUCTORS[node_type](node, new_children)
+    
+    return node
+
+@dataclass(frozen=True)
+class LinearTransform(IRNode):
+    arguments: Tuple[Argument, ...]
+    scales: Tuple[int, ...]
+    shifts: Tuple[int, ...]
+    child: IRNode
+
+    def __post_init__(self):
+        n_args = len(self.arguments)
+        if len(self.scales) != n_args:
+            raise ValueError(f"scales length {len(self.scales)} does not match arguments length {n_args}")
+        if len(self.shifts) != n_args:
+            raise ValueError(f"shifts length {len(self.shifts)} does not match arguments length {n_args}")
+
+    @classmethod
+    def identity(cls, arguments: Tuple[Argument, ...], child: IRNode) -> LinearTransform:
+        n = len(arguments)
+        return cls(
+            arguments=arguments,
+            scales=tuple(1 for _ in range(n)),
+            shifts=tuple(0 for _ in range(n)),
+            child=child
+        )
+
+    def apply_scale(self, scale_vec: Tuple[int, ...]) -> "LinearTransform":
+        if len(scale_vec) != len(self.scales):
+            raise ValueError("scale vector must have same length as scales")
+        new_scales = tuple(s * sc for s, sc in zip(self.scales, scale_vec))
+        new_shifts = tuple(sh * sc for sh, sc in zip(self.shifts, scale_vec))
+        return LinearTransform(self.arguments, new_scales, new_shifts, self.child)
+
+    def apply_shift(self, shift_vec: Tuple[int, ...]) -> "LinearTransform":
+        if len(shift_vec) != len(self.shifts):
+            raise ValueError("shift vector must have same length as shifts")
+        new_shifts = tuple(sh + delta for sh, delta in zip(self.shifts, shift_vec))
+        return LinearTransform(self.arguments, self.scales, new_shifts, self.child)
+
+    @property
+    def children(self) -> Tuple[IRNode, ...]:
+        return (self.child,)
+
+
+def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
+    usages = fold_ir(ir, scopes, count_identifiers)
+    once_used_ids = {id for id, count in usages.items() if count == 1 and scopes.lookup_by_id(id) is not None}
+
+    print(f"Inlining {len(once_used_ids)} definitions")
+
+    if not once_used_ids:
+        return ir
+
+    def mapper(node: IRNode, new_children: List[IRNode]) -> IRNode:
+        result = inline_mapper(node, new_children, once_used_ids, scopes)
+        return result
+
+    optimized_tree = map_ir(ir, scopes, mapper)
+    print("Optimization complete")
+    print(optimized_tree)
+
+    return optimized_tree
