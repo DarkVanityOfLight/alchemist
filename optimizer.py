@@ -12,12 +12,17 @@ if TYPE_CHECKING:
     from scope_handler import ScopeHandler
 
 
+_inlined = 0
 _semantic_children_cache = {}
 
 def semantic_children(node: IRNode, scopes: ScopeHandler) -> Tuple[IRNode, ...]:
     """Get the semantic children of a node, resolving identifiers through scopes."""
     # Use node id and a simple cache key
-    cache_key = (id(node), type(node).__name__)
+    cache_key = None
+    if isinstance(node, Identifier):
+        cache_key = (id(node), type(node).__name__, node.ptr)
+    else:
+        cache_key = (id(node), type(node).__name__)
     
     if cache_key in _semantic_children_cache:
         cached_result = _semantic_children_cache[cache_key]
@@ -126,6 +131,9 @@ def inline_mapper(node: IRNode, new_children: List[IRNode],
     
     # Inline identifiers used exactly once
     if isinstance(node, Identifier) and node.ptr in once_used_ids:
+        global _inlined
+        _inlined += 1
+        # print(_inlined)
         definition = scopes.lookup_by_id(node.ptr)
         if definition:
             def recursive_mapper(inner_node: IRNode, inner_children: List[IRNode]) -> IRNode:
@@ -135,16 +143,17 @@ def inline_mapper(node: IRNode, new_children: List[IRNode],
     
     # Handle reconstruction for SetComprehension with updated domain AND guard
     if isinstance(node, SetComprehension):
-        new_domain = new_children[0] if new_children else node.domain
+        new_domain = new_children[0]
         new_guard = node.guard
         
         # Update guard expression if it exists
-        if isinstance(node.guard, SetGuard) and node.guard.set_expr is not None:
+        if isinstance(new_guard, SetGuard) and node.guard.set_expr is not None: # type: ignore
             if len(new_children) > 1:
-                new_guard = replace(node.guard, set_expr=new_children[1])
+                new_guard = replace(new_guard, set_expr=new_children[1])
             else:
-                new_guard = replace(node.guard, set_expr=None)
-        
+                # Maintain existing expression if no new child
+                new_guard = replace(new_guard, set_expr=node.guard.set_expr) #type: ignore
+                
         return replace(node, domain=new_domain, guard=new_guard)
     
     # Handle reconstruction for SetGuard nodes directly
@@ -262,6 +271,12 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
     raise NotImplementedError(f"Did not implement LTF pushdown for node: {child}")
 
 def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
+    # total_nodes = fold_ir(
+    #     ir,
+    #     scopes,
+    #     lambda node, child_counts: 1 + sum(child_counts)
+    # )
+
     usages = fold_ir(ir, scopes, count_identifiers)
     once_used_ids = {id for id, count in usages.items() if count == 1 and scopes.lookup_by_id(id) is not None}
 
@@ -284,5 +299,5 @@ def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
     ltf_ir = push_linear_transform(ltf)
 
 
-    print(ltf_ir)
+    # print(ltf_ir)
     return ltf_ir
