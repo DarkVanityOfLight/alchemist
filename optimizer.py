@@ -11,8 +11,6 @@ from guards import Guard, SMTGuard, SetGuard, SimpleGuard
 if TYPE_CHECKING:
     from scope_handler import ScopeHandler
 
-_inlined = 0
-
 def semantic_children(node: IRNode, scopes: ScopeHandler) -> Tuple[IRNode, ...]:
     """Get the semantic children of a node, resolving identifiers through scopes."""
     if isinstance(node, Identifier):
@@ -63,28 +61,54 @@ def map_ir(node: IRNode,
     memo[key] = result
     return result
 
-def map_ir_pruned(
+def map_ir_with_inlining(
     node: IRNode,
     scopes: ScopeHandler,
-    fn: Callable[[IRNode, List[IRNode]], IRNode],
     once_used_ids: Set[int],
-    memo: Optional[Dict[int, IRNode]] = None
+    memo: Optional[Dict[int, IRNode]] = None,
+    inline_memo: Optional[Dict[int, IRNode]] = None
 ) -> IRNode:
+    """Optimized single-pass mapping with inlining and proper memoization."""
     if memo is None:
         memo = {}
+    if inline_memo is None:
+        inline_memo = {}
+    
     key = id(node)
     if key in memo:
         return memo[key]
 
-    # PRUNE: if this is an Identifier we won't inline, process it normally
-    # but don't recurse into its definition
+    # Handle inlining for identifiers used exactly once
+    if isinstance(node, Identifier) and node.ptr in once_used_ids:
+        if key in inline_memo:
+            return inline_memo[key]
+            
+        definition = scopes.lookup_by_id(node.ptr)
+        if definition:
+            # Recursively process the definition with the same memo dictionaries
+            result = map_ir_with_inlining(definition, scopes, once_used_ids, memo, inline_memo)
+            inline_memo[key] = result
+            memo[key] = result
+            return result
+        memo[key] = node
+        return node
+    
+    # PRUNE: if this is an Identifier we won't inline, don't recurse into its definition
     if isinstance(node, Identifier) and node.ptr not in once_used_ids:
         memo[key] = node
         return node
 
+    # Process children
     kids = semantic_children(node, scopes)
-    new_kids = [map_ir_pruned(ch, scopes, fn, once_used_ids, memo) for ch in kids]
-    result = fn(node, new_kids)
+    new_kids = [map_ir_with_inlining(ch, scopes, once_used_ids, memo, inline_memo) for ch in kids]
+    
+    # Check if reconstruction is needed (optimized)
+    if len(new_kids) == len(kids) and all(new_child is old_child for new_child, old_child in zip(new_kids, kids)):
+        memo[key] = node
+        return node
+    
+    # Reconstruct the node
+    result = reconstruct_node(node, new_kids)
     memo[key] = result
     return result
 
@@ -140,37 +164,22 @@ def reconstruct_node(node: IRNode, new_children: List[IRNode]) -> IRNode:
     print(f"{node} was not reconstructed")
     return node
 
-def inline_mapper(node: IRNode, new_children: List[IRNode], 
-                  once_used_ids: set, scopes: ScopeHandler,
-                  inline_memo: Optional[Dict[int, IRNode]] = None) -> IRNode:
-    if inline_memo is None:
-        inline_memo = {}
+def preprocess_definitions_batch(
+    definitions_to_preprocess: Dict[int, IRNode],
+    once_used_ids: Set[int],
+    scopes: ScopeHandler
+) -> Dict[int, IRNode]:
+    """Preprocess multiple definitions in a single batch with shared memoization."""
+    shared_memo: Dict[int, IRNode] = {}
+    shared_inline_memo: Dict[int, IRNode] = {}
     
-    # Inline identifiers used exactly once
-    if isinstance(node, Identifier) and node.ptr in once_used_ids:
-        if id(node) in inline_memo:
-            return inline_memo[id(node)]
-            
-        global _inlined
-        _inlined += 1
-        definition = scopes.lookup_by_id(node.ptr)
-        if definition:
-            def recursive_mapper(inner_node: IRNode, inner_children: List[IRNode]) -> IRNode:
-                return inline_mapper(inner_node, inner_children, once_used_ids, scopes, inline_memo)
-            
-            result = map_ir(definition, scopes, recursive_mapper)
-            inline_memo[id(node)] = result
-            return result
-        return node
+    processed = {}
+    for def_id, tree in definitions_to_preprocess.items():
+        processed[def_id] = map_ir_with_inlining(
+            tree, scopes, once_used_ids, shared_memo, shared_inline_memo
+        )
     
-    # Check if reconstruction is needed
-    current_children = semantic_children(node, scopes)
-    if new_children and len(new_children) == len(current_children):
-        # Compare actual children, not just length
-        if all(new_child is old_child for new_child, old_child in zip(new_children, current_children)):
-            return node
-    
-    return reconstruct_node(node, new_children)
+    return processed
 
 @dataclass(frozen=True)
 class LinearTransform(Guard, SymbolicSet):
@@ -282,17 +291,6 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
     raise NotImplementedError(f"Linear transform pushdown not implemented for {type(child).__name__}")
 
 
-def preprocess_multiple_used_definition(
-    node: IRNode,
-    once_used_ids: Set[int],
-    scopes: ScopeHandler,
-) -> IRNode:
-    def mapper(node: IRNode, new_children: List[IRNode]) -> IRNode:
-        return inline_mapper(node, new_children, once_used_ids, scopes)
-
-    return map_ir(node, scopes, mapper)
-
-
 def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
     total_nodes = fold_ir(
         ir,
@@ -308,32 +306,27 @@ def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
     if not once_used_ids:
         return ir
 
-    # Preprocess definitions that are used multiple times
     to_preprocess = {
         def_id: tree
         for def_id, tree in scopes.parsed_ids.items()
         if def_id not in once_used_ids
     }
     
-    new_id_mapping: Dict[int, IRNode] = {
-        def_id: preprocess_multiple_used_definition(tree, once_used_ids, scopes)
-        for def_id, tree in to_preprocess.items()
-    }
+    if to_preprocess:
+        print(f"Batch preprocessing {len(to_preprocess)} definitions")
+        new_id_mapping = preprocess_definitions_batch(to_preprocess, once_used_ids, scopes)
+        
+        # Patch lookup_by_id to use preprocessed definitions
+        orig_lookup = scopes.lookup_by_id
+        def lookup_by_id_patched(id: int) -> Optional[IRNode]:
+            if id in new_id_mapping:
+                return new_id_mapping[id]
+            return orig_lookup(id)
+        scopes.lookup_by_id = lookup_by_id_patched
 
-    # Patch lookup_by_id to use preprocessed definitions
-    orig_lookup = scopes.lookup_by_id
-    def lookup_by_id_patched(id: int) -> Optional[IRNode]:
-        if id in new_id_mapping:
-            return new_id_mapping[id]
-        return orig_lookup(id)
-    scopes.lookup_by_id = lookup_by_id_patched
+    print("Done preprocessing")
 
-    # Perform inlining with pruning
-    inlined_ir = map_ir_pruned(
-        ir, scopes,
-        lambda node, kids: inline_mapper(node, kids, once_used_ids, scopes),
-        once_used_ids
-    )
+    inlined_ir = map_ir_with_inlining(ir, scopes, once_used_ids)
 
     print("Inline complete")
     print(inlined_ir)
