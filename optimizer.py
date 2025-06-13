@@ -5,7 +5,7 @@ from expressions import (
     UnionSet, IntersectionSet, ComplementSet,
     LinearScale, Shift, SetComprehension, SymbolicSet, Vector, Scalar, UnionSpace
 )
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, replace
 import logging
 
@@ -30,6 +30,16 @@ def get_semantic_children(node: IRNode, scopes: ScopeHandler) -> Tuple[IRNode, .
             children.append(node.guard.set_expr) #type: ignore
         return tuple(children)
     return node.children
+
+
+def get_raw_children(node: IRNode) -> List[IRNode]:
+    """Get the actual children that should be processed for replacement."""
+    if isinstance(node, SetComprehension):
+        children = [node.domain]
+        if isinstance(node.guard, SetGuard) and node.guard.set_expr is not None:
+            children.append(node.guard.set_expr)
+        return children #type: ignore
+    return list(node.children)
 
 
 def fold_ir(
@@ -93,49 +103,199 @@ def reconstruct_node(node: IRNode, new_children: List[IRNode]) -> IRNode:
     return node
 
 # -----------------------------------------------------------------------------
-# Identifier inlining utilities
+# Identifier inlining
 # -----------------------------------------------------------------------------
+def build_dependency_graph(
+    root: IRNode,
+    scopes: ScopeHandler
+) -> Tuple[Dict[int, IRNode], Dict[int, Set[int]]]:
+    """Build dependency graph with definitions and dependencies."""
+    definitions = {}
+    graph = defaultdict(set)
+    visited = set()
+    
+    def collect_definitions(node: IRNode):
+        if id(node) in visited:
+            return
+        visited.add(id(node))
+        
+        if isinstance(node, Identifier):
+            ptr = node.ptr
+            if ptr not in definitions:
+                def_node = scopes.lookup_by_id(ptr)
+                if def_node:
+                    definitions[ptr] = def_node
+                    collect_definitions(def_node)
+        else:
+            for child in node.children:
+                collect_definitions(child)
+    
+    # Collect all definitions referenced from root
+    collect_definitions(root)
+    
+    # Build dependency graph by analyzing each definition
+    for ptr, def_node in definitions.items():
+        dependencies = collect_identifier_pointers(def_node)
+        # Only include dependencies that have definitions in our scope
+        graph[ptr] = {dep for dep in dependencies if dep in definitions}
+    
+    return definitions, graph
 
-def count_identifiers(node: IRNode, child_counts: Tuple[Counter, ...]) -> Counter:
-    total = Counter()
-    for c in child_counts:
-        total.update(c)
+
+def collect_identifier_pointers(node: IRNode) -> Set[int]:
+    """Collect all identifier pointers in a node tree using raw traversal."""
+    pointers = set()
+    
     if isinstance(node, Identifier):
-        total[node.ptr] += 1
-    return total
+        pointers.add(node.ptr)
+    
+    for child in node.children:
+        pointers.update(collect_identifier_pointers(child))
+    
+    return pointers
 
 
-def find_once_used_ids(root: IRNode, scopes: ScopeHandler) -> Set[int]:
-    counts = fold_ir(root, scopes, count_identifiers)
-    return {id_ for id_, cnt in counts.items() if cnt == 1 and scopes.lookup_by_id(id_) is not None}
-
-
-def inline_identifiers(
-    node: IRNode,
-    scopes: ScopeHandler,
-    once_used: Set[int],
-    memo: Optional[Dict[int, IRNode]] = None
-) -> IRNode:
-    memo = memo if memo is not None else {}
-    key = id(node)
-    if key in memo:
-        return memo[key]
-    if isinstance(node, Identifier) and node.ptr in once_used:
-        definition = scopes.lookup_by_id(node.ptr)
-        if definition:
-            result = inline_identifiers(definition, scopes, once_used, memo)
-            memo[key] = result
-            return result
-        memo[key] = node
-        return node
-    if isinstance(node, Identifier):
-        memo[key] = node
-        return node
-    kids = get_semantic_children(node, scopes)
-    new_kids = [inline_identifiers(ch, scopes, once_used, memo) for ch in kids]
-    result = reconstruct_node(node, new_kids)
-    memo[key] = result
+def topological_sort(graph: Dict[int, Set[int]]) -> List[int]:
+    """Return topologically sorted list of identifiers."""
+    # Calculate in-degrees
+    in_degree = {node: 0 for node in graph}
+    for node, dependencies in graph.items():
+        for dep in dependencies:
+            if dep in in_degree:
+                in_degree[node] += 1
+    
+    # Find nodes with no incoming edges
+    queue = deque([node for node, degree in in_degree.items() if degree == 0])
+    result = []
+    
+    while queue:
+        node = queue.popleft()
+        result.append(node)
+        
+        # Reduce in-degree for nodes that depend on current node
+        for other_node, dependencies in graph.items():
+            if node in dependencies:
+                in_degree[other_node] -= 1
+                if in_degree[other_node] == 0:
+                    queue.append(other_node)
+    
+    # Check for cycles
+    if len(result) != len(graph):
+        logger.warning("Circular dependencies detected in identifier graph")
+    
     return result
+
+
+def inline_all_identifiers(root: IRNode, scopes: ScopeHandler) -> IRNode:
+    """
+    Two-pass inlining:
+    1. Build complete substitution map in dependency order
+    2. Apply all substitutions to root
+    """
+    # Pass 1: Collect all definitions and build dependency graph
+    definitions, dependency_graph = build_dependency_graph(root, scopes)
+    
+    if not definitions:
+        logger.info("No definitions found for inlining")
+        return root
+    
+    logger.info(f"Found {len(definitions)} definitions to inline")
+    for ptr, def_node in definitions.items():
+        logger.debug(f"Definition {ptr}: {type(def_node).__name__}")
+    
+    # Sort definitions in topological order (dependencies first)
+    sorted_identifiers = topological_sort(dependency_graph)
+    logger.info(f"Topological order: {sorted_identifiers}")
+    
+    # Build substitution map by processing definitions in order
+    substitution_map = {}
+    
+    for identifier_ptr in sorted_identifiers:
+        if identifier_ptr in definitions:
+            original_definition = definitions[identifier_ptr]
+            # Replace identifiers in this definition using current substitution map
+            inlined_definition = replace_identifiers(original_definition, substitution_map)
+            substitution_map[identifier_ptr] = inlined_definition
+            logger.debug(f"Inlined {identifier_ptr}: {type(original_definition).__name__} -> {type(inlined_definition).__name__}")
+    
+    logger.info(f"Built substitution map with {len(substitution_map)} entries")
+    
+    # Pass 2: Apply all substitutions to root
+    result = replace_identifiers(root, substitution_map)
+    
+    # Check if we still have identifiers in the result
+    remaining_identifiers = collect_identifier_pointers(result)
+    if remaining_identifiers:
+        logger.warning(f"Still have unresolved identifiers after inlining: {remaining_identifiers}")
+        for ptr in remaining_identifiers:
+            if ptr in substitution_map:
+                logger.warning(f"  {ptr} was in substitution map")
+            else:
+                logger.warning(f"  {ptr} was NOT in substitution map")
+    
+    return result
+
+
+def replace_identifiers(node: IRNode, substitution_map: Dict[int, IRNode]) -> IRNode:
+    """Recursively replace identifiers using substitution map."""
+    if isinstance(node, Identifier) and node.ptr in substitution_map:
+        return substitution_map[node.ptr]
+    
+    # Handle all node types explicitly
+    if isinstance(node, SetComprehension):
+        new_domain = replace_identifiers(node.domain, substitution_map)
+        new_guard = node.guard
+        if isinstance(new_guard, SetGuard) and new_guard.set_expr is not None:
+            new_guard = replace(new_guard, set_expr=replace_identifiers(new_guard.set_expr, substitution_map))
+        return replace(node, domain=new_domain, guard=new_guard)
+    
+    if isinstance(node, SetGuard) and node.set_expr is not None:
+        new_set_expr = replace_identifiers(node.set_expr, substitution_map)
+        return replace(node, set_expr=new_set_expr)
+    
+    if isinstance(node, LinearScale):
+        new_scaled_set = replace_identifiers(node.scaled_set, substitution_map)
+        return replace(node, scaled_set=new_scaled_set)
+    
+    if isinstance(node, Shift):
+        new_shifted_set = replace_identifiers(node.shifted_set, substitution_map)
+        return replace(node, shifted_set=new_shifted_set)
+    
+    if isinstance(node, UnionSet):
+        new_parts = tuple(replace_identifiers(part, substitution_map) for part in node.parts)
+        return replace(node, parts=new_parts)
+    
+    if isinstance(node, IntersectionSet):
+        new_parts = tuple(replace_identifiers(part, substitution_map) for part in node.parts)
+        return replace(node, parts=new_parts)
+    
+    if isinstance(node, ComplementSet):
+        new_complemented_set = replace_identifiers(node.complemented_set, substitution_map)
+        return replace(node, complemented_set=new_complemented_set)
+    
+    if isinstance(node, FiniteSet):
+        new_members = frozenset(replace_identifiers(member, substitution_map) for member in node.members)
+        return replace(node, members=new_members)
+    
+    if isinstance(node, VectorSpace):
+        new_basis = tuple(replace_identifiers(basis_vec, substitution_map) for basis_vec in node.basis)
+        return replace(node, basis=new_basis)
+    
+    if isinstance(node, UnionSpace):
+        new_parts = tuple(replace_identifiers(part, substitution_map) for part in node.parts)
+        return replace(node, parts=new_parts)
+    
+    # For any other node types, try the generic approach
+    try:
+        children = get_raw_children(node)
+        new_children = [replace_identifiers(child, substitution_map) for child in children]
+        return reconstruct_node(node, new_children)
+    except Exception as e:
+        logger.warning(f"Failed to replace identifiers in {type(node).__name__}: {e}")
+        return node
+
+
+
 
 # -----------------------------------------------------------------------------
 # LinearTransform pushdown
@@ -202,24 +362,26 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
             arguments=child.arguments,
             set_expr=push_linear_transform(LinearTransform.identity(ltf.arguments, child.set_expr)) #type: ignore
         )
+    if isinstance(child, Vector):
+        return Vector(tuple([ltf.scales[i] * child.comps[i] + ltf.shifts[i] for i in range(child.dimension)]))
     raise NotImplementedError(f"LT pushdown not implemented for {type(child).__name__}")
 
 # -----------------------------------------------------------------------------
 # Top-level optimization
 # -----------------------------------------------------------------------------
 def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
+    """Optimized version using two-pass inlining."""
     logger.info("Starting optimization")
-    total = fold_ir(ir, scopes, lambda n, cs: 1 + sum(cs))
-    logger.debug("Total IR nodes: %d", total)
-    once = find_once_used_ids(ir, scopes)
-    if once:
-        logger.debug("Inlining %d once-used identifiers", len(once))
-        ir = inline_identifiers(ir, scopes, once)
-    else:
-        logger.debug("No identifiers to inline")
+    
+    # Inline all identifiers using two-pass approach
+    ir = inline_all_identifiers(ir, scopes)
+    logger.info("Inlined all identifiers")
+    
+    # Apply linear transform pushdown if applicable
     if isinstance(ir, SetComprehension):
         ltf = LinearTransform.identity(ir.arguments, ir)
         ir = push_linear_transform(ltf)
         logger.info("Applied linear transform pushdown")
+    
     logger.info("Optimization complete")
     return ir
