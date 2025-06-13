@@ -99,6 +99,8 @@ def reconstruct_node(node: IRNode, new_children: List[IRNode]) -> IRNode:
         return replace(node, complemented_set=new_children[0])
     if isinstance(node, SetGuard) and node.set_expr is not None:
         return replace(node, set_expr=new_children[0])
+    if isinstance(node, Annotated):
+        return replace(node, base=new_children[0])
     logger.debug("No reconstruction for %s", type(node).__name__)
     return node
 
@@ -326,6 +328,41 @@ class LinearTransform(SymbolicSet):
         return LinearTransform(self.arguments, self.scales, new_shifts, self.child)
 
 
+@dataclass(frozen=True)
+class Annotated(IRNode):
+    base: IRNode
+    meta: dict[str, Any]
+    
+    def __getattribute__(self, name):
+        if name in ('base', 'meta'):
+            return object.__getattribute__(self, name)
+        
+        if name == '__class__':
+            return object.__getattribute__(self, 'base').__class__
+            
+        # Special handling for dataclass replace operations
+        if name in ('__dataclass_fields__', '__dataclass_params__'):
+            return getattr(object.__getattribute__(self, 'base'), name)
+        
+        try:
+            base = object.__getattribute__(self, 'base')
+            return getattr(base, name)
+        except AttributeError:
+            return object.__getattribute__(self, name)
+
+    def __repr__(self) -> str:
+        if not self.meta:
+            return f"@{self.base!r}"
+        return f"@{self.base!r} {self.meta!r}"
+
+def is_annotated(node: IRNode) -> bool:
+    return object.__getattribute__(node, '__class__') is Annotated
+
+def get_annotations(node: IRNode) -> dict[str, Any]:
+    if is_annotated(node):
+        return object.__getattribute__(node, 'meta')
+    return {}
+
 def push_linear_transform(ltf: LinearTransform) -> IRNode:
     child = ltf.child
     # Base cases
@@ -334,7 +371,7 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
     # Absorption
     if isinstance(child, LinearScale):
         new_ltf = ltf.apply_scale(child.factor.comps)
-        return push_linear_transform(replace(new_ltf, child=child.scaled_set))
+        return push_linear_transform(replace(new_ltf, child=Annotated(child.scaled_set, {"mod_guard": ltf.scales})))
     if isinstance(child, Shift):
         new_ltf = ltf.apply_shift(child.shift.comps)
         return push_linear_transform(replace(new_ltf, child=child.shifted_set))
@@ -378,10 +415,10 @@ def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
     logger.info("Inlined all identifiers")
     
     # Apply linear transform pushdown if applicable
-    if isinstance(ir, SetComprehension):
-        ltf = LinearTransform.identity(ir.arguments, ir)
-        ir = push_linear_transform(ltf)
-        logger.info("Applied linear transform pushdown")
+    assert isinstance(ir, SetComprehension)
+    ltf = LinearTransform.identity(ir.arguments, ir)
+    ir = push_linear_transform(ltf)
+    logger.info("Applied linear transform pushdown")
     
     logger.info("Optimization complete")
     return ir
