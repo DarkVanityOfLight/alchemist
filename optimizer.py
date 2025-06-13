@@ -1,341 +1,232 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 from expressions import (
-    Argument, IRNode, Identifier, ProductDomain, Scalar, UnionSpace, Vector, VectorSpace, FiniteSet, UnionSet, IntersectionSet,
-    DifferenceSet, ComplementSet, LinearScale, Shift, SetComprehension, SymbolicSet
+    Argument, IRNode, Identifier, ProductDomain, VectorSpace, FiniteSet,
+    UnionSet, IntersectionSet, DifferenceSet, ComplementSet,
+    LinearScale, Shift, SetComprehension, SymbolicSet, Vector, Scalar, UnionSpace
 )
 from collections import Counter
 from dataclasses import dataclass, replace
+import logging
 
-from guards import Guard, SMTGuard, SetGuard, SimpleGuard
+from guards import SetGuard, SimpleGuard
+
 if TYPE_CHECKING:
     from scope_handler import ScopeHandler
 
-def semantic_children(node: IRNode, scopes: ScopeHandler) -> Tuple[IRNode, ...]:
-    """Get the semantic children of a node, resolving identifiers through scopes."""
+logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Core traversal utilities
+# -----------------------------------------------------------------------------
+
+def get_semantic_children(node: IRNode, scopes: ScopeHandler) -> Tuple[IRNode, ...]:
     if isinstance(node, Identifier):
-        sbtree = scopes.lookup_by_id(node.ptr)
-        return (sbtree,) if sbtree else ()
-    elif isinstance(node, SetComprehension):
-        # Always include domain, conditionally include guard's set_expr
-        children = [node.domain]
-        if isinstance(node.guard, SetGuard) and node.guard.set_expr is not None:
-            children.append(node.guard.set_expr)
+        resolved = scopes.lookup_by_id(node.ptr)
+        return (resolved,) if resolved else ()
+    if isinstance(node, SetComprehension):
+        children: List[IRNode] = [node.domain]
+        if isinstance(node.guard, SetGuard) and node.guard.set_expr is not None: #type: ignore
+            children.append(node.guard.set_expr) #type: ignore
         return tuple(children)
-    else:
-        return node.children
+    return node.children
 
 
-def fold_ir(node: IRNode,
-            scopes: ScopeHandler,
-            fn: Callable[[IRNode, Tuple[Any, ...]], Any],
-            memo: Optional[Dict[int, Any]] = None
-           ) -> Any:
-    if memo is None:
-        memo = {}
+def fold_ir(
+    node: IRNode,
+    scopes: ScopeHandler,
+    fn: Callable[[IRNode, Tuple[Any, ...]], Any],
+    memo: Optional[Dict[int, Any]] = None
+) -> Any:
+    memo = memo if memo is not None else {}
     key = id(node)
     if key in memo:
         return memo[key]
-
-    kids = semantic_children(node, scopes)
-    child_vals = tuple(fold_ir(ch, scopes, fn, memo) for ch in kids)
+    child_vals = tuple(fold_ir(ch, scopes, fn, memo) for ch in get_semantic_children(node, scopes))
     result = fn(node, child_vals)
     memo[key] = result
     return result
 
 
-def map_ir(node: IRNode,
-           scopes: ScopeHandler,
-           fn: Callable[[IRNode, List[IRNode]], IRNode],
-           memo: Optional[Dict[int, IRNode]] = None
-          ) -> IRNode:
-    if memo is None:
-        memo = {}
+def map_ir(
+    node: IRNode,
+    scopes: ScopeHandler,
+    fn: Callable[[IRNode, List[IRNode]], IRNode],
+    memo: Optional[Dict[int, IRNode]] = None
+) -> IRNode:
+    memo = memo if memo is not None else {}
     key = id(node)
     if key in memo:
         return memo[key]
-
-    kids: Tuple[IRNode, ...] = semantic_children(node, scopes)
-    new_kids: List[IRNode] = [map_ir(ch, scopes, fn, memo) for ch in kids]
+    kids = get_semantic_children(node, scopes)
+    new_kids = [map_ir(ch, scopes, fn, memo) for ch in kids]
     result = fn(node, new_kids)
     memo[key] = result
     return result
 
-def map_ir_with_inlining(
+# -----------------------------------------------------------------------------
+# Reconstruction logic
+# -----------------------------------------------------------------------------
+
+def reconstruct_node(node: IRNode, new_children: List[IRNode]) -> IRNode:
+    if not new_children:
+        return node
+    if isinstance(node, SetComprehension):
+        domain, *rest = new_children
+        guard = node.guard
+        if isinstance(guard, SetGuard) and guard.set_expr is not None and rest:
+            guard = replace(guard, set_expr=rest[0])
+        return replace(node, domain=domain, guard=guard)
+    if isinstance(node, VectorSpace):
+        return replace(node, basis=tuple(new_children))
+    if isinstance(node, FiniteSet):
+        return replace(node, members=frozenset(new_children))
+    if isinstance(node, UnionSet):
+        return replace(node, parts=tuple(new_children))
+    if isinstance(node, IntersectionSet):
+        return replace(node, parts=tuple(new_children))
+    if isinstance(node, DifferenceSet):
+        return replace(node, minuend=new_children[0], subtrahend=new_children[1])
+    if isinstance(node, ComplementSet):
+        return replace(node, complemented_set=new_children[0])
+    if isinstance(node, SetGuard) and node.set_expr is not None:
+        return replace(node, set_expr=new_children[0])
+    logger.debug("No reconstruction for %s", type(node).__name__)
+    return node
+
+# -----------------------------------------------------------------------------
+# Identifier inlining utilities
+# -----------------------------------------------------------------------------
+
+def count_identifiers(node: IRNode, child_counts: Tuple[Counter, ...]) -> Counter:
+    total = Counter()
+    for c in child_counts:
+        total.update(c)
+    if isinstance(node, Identifier):
+        total[node.ptr] += 1
+    return total
+
+
+def find_once_used_ids(root: IRNode, scopes: ScopeHandler) -> Set[int]:
+    counts = fold_ir(root, scopes, count_identifiers)
+    return {id_ for id_, cnt in counts.items() if cnt == 1 and scopes.lookup_by_id(id_) is not None}
+
+
+def inline_identifiers(
     node: IRNode,
     scopes: ScopeHandler,
-    once_used_ids: Set[int],
-    memo: Optional[Dict[int, IRNode]] = None,
-    inline_memo: Optional[Dict[int, IRNode]] = None
+    once_used: Set[int],
+    memo: Optional[Dict[int, IRNode]] = None
 ) -> IRNode:
-    """Optimized single-pass mapping with inlining and proper memoization."""
-    if memo is None:
-        memo = {}
-    if inline_memo is None:
-        inline_memo = {}
-    
+    memo = memo if memo is not None else {}
     key = id(node)
     if key in memo:
         return memo[key]
-
-    # Handle inlining for identifiers used exactly once
-    if isinstance(node, Identifier) and node.ptr in once_used_ids:
-        if key in inline_memo:
-            return inline_memo[key]
-            
+    if isinstance(node, Identifier) and node.ptr in once_used:
         definition = scopes.lookup_by_id(node.ptr)
         if definition:
-            # Recursively process the definition with the same memo dictionaries
-            result = map_ir_with_inlining(definition, scopes, once_used_ids, memo, inline_memo)
-            inline_memo[key] = result
+            result = inline_identifiers(definition, scopes, once_used, memo)
             memo[key] = result
             return result
         memo[key] = node
         return node
-    
-    # PRUNE: if this is an Identifier we won't inline, don't recurse into its definition
-    if isinstance(node, Identifier) and node.ptr not in once_used_ids:
+    if isinstance(node, Identifier):
         memo[key] = node
         return node
-
-    # Process children
-    kids = semantic_children(node, scopes)
-    new_kids = [map_ir_with_inlining(ch, scopes, once_used_ids, memo, inline_memo) for ch in kids]
-    
-    # Check if reconstruction is needed (optimized)
-    if len(new_kids) == len(kids) and all(new_child is old_child for new_child, old_child in zip(new_kids, kids)):
-        memo[key] = node
-        return node
-    
-    # Reconstruct the node
+    kids = get_semantic_children(node, scopes)
+    new_kids = [inline_identifiers(ch, scopes, once_used, memo) for ch in kids]
     result = reconstruct_node(node, new_kids)
     memo[key] = result
     return result
 
-def count_identifiers(node: IRNode, child_counts: Tuple[Counter, ...]) -> Counter:
-    """Count identifier usage in the IR tree by ID."""
-    total = Counter()
-    for cnt in child_counts:
-        total.update(cnt)
-    
-    if isinstance(node, Identifier):
-        total[node.ptr] += 1
-    
-    return total
-
-def reconstruct_node(node: IRNode, new_children: List[IRNode]) -> IRNode:
-    """Generic node reconstruction using dataclass replace."""
-    if not new_children:
-        return node
-    
-    # Handle special cases that don't follow standard children pattern
-    if isinstance(node, SetComprehension):
-        new_domain = new_children[0]
-        new_guard = node.guard
-        
-        # Update guard expression if it exists and we have a second child
-        if isinstance(new_guard, SetGuard) and node.guard.set_expr is not None: #type: ignore
-            if len(new_children) > 1:
-                new_guard = replace(new_guard, set_expr=new_children[1])
-                
-        return replace(node, domain=new_domain, guard=new_guard)
-    
-    elif isinstance(node, VectorSpace):
-        return replace(node, basis=tuple(new_children))
-    elif isinstance(node, FiniteSet):
-        return replace(node, members=frozenset(new_children))
-    elif isinstance(node, UnionSet):
-        return replace(node, parts=tuple(new_children))
-    elif isinstance(node, IntersectionSet):
-        return replace(node, parts=tuple(new_children))
-    elif isinstance(node, DifferenceSet):
-        return replace(node, minuend=new_children[0], subtrahend=new_children[1])
-    elif isinstance(node, ComplementSet):
-        return replace(node, complemented_set=new_children[0])
-    elif isinstance(node, LinearScale):
-        return replace(node, scaled_set=new_children[0])
-    elif isinstance(node, Shift):
-        return replace(node, shifted_set=new_children[0])
-    elif isinstance(node, SetGuard) and node.set_expr is not None:
-        return replace(node, set_expr=new_children[0])
-    
-    # For other nodes, assume they follow the standard children pattern
-    # This is a fallback - ideally all node types should be handled explicitly
-    print(f"{node} was not reconstructed")
-    return node
-
-def preprocess_definitions_batch(
-    definitions_to_preprocess: Dict[int, IRNode],
-    once_used_ids: Set[int],
-    scopes: ScopeHandler
-) -> Dict[int, IRNode]:
-    """Preprocess multiple definitions in a single batch with shared memoization."""
-    shared_memo: Dict[int, IRNode] = {}
-    shared_inline_memo: Dict[int, IRNode] = {}
-    
-    processed = {}
-    for def_id, tree in definitions_to_preprocess.items():
-        processed[def_id] = map_ir_with_inlining(
-            tree, scopes, once_used_ids, shared_memo, shared_inline_memo
-        )
-    
-    return processed
-
+# -----------------------------------------------------------------------------
+# LinearTransform pushdown
+# -----------------------------------------------------------------------------
 @dataclass(frozen=True)
-class LinearTransform(Guard, SymbolicSet):
+class LinearTransform(SymbolicSet):
     arguments: Tuple[Argument, ...]
     scales: Tuple[int, ...]
     shifts: Tuple[int, ...]
     child: IRNode
 
     def __post_init__(self):
-        n_args = len(self.arguments)
-        if len(self.scales) != n_args:
-            raise ValueError(f"scales length {len(self.scales)} does not match arguments length {n_args}")
-        if len(self.shifts) != n_args:
-            raise ValueError(f"shifts length {len(self.shifts)} does not match arguments length {n_args}")
+        if len(self.scales) != len(self.arguments) or len(self.shifts) != len(self.arguments):
+            raise ValueError("Scale/shift lengths must match argument count")
 
     @classmethod
-    def identity(cls, arguments: Tuple[Argument, ...], child: IRNode) -> LinearTransform:
-        n = len(arguments)
-        return cls(
-            arguments=arguments,
-            scales=tuple(1 for _ in range(n)),
-            shifts=tuple(0 for _ in range(n)),
-            child=child
-        )
+    def identity(cls, args: Tuple[Argument, ...], child: IRNode) -> LinearTransform:
+        n = len(args)
+        return cls(args, (1,) * n, (0,) * n, child)
 
-    def apply_scale(self, scale_vec: Tuple[int, ...]) -> LinearTransform:
-        if len(scale_vec) != len(self.scales):
-            raise ValueError("scale vector must have same length as scales")
-        new_scales = tuple(s * sc for s, sc in zip(self.scales, scale_vec))
-        new_shifts = tuple(sh * sc for sh, sc in zip(self.shifts, scale_vec))
+    def apply_scale(self, factor: Tuple[int, ...]) -> LinearTransform:
+        new_scales = tuple(s * f for s, f in zip(self.scales, factor))
+        new_shifts = tuple(sh * f for sh, f in zip(self.shifts, factor))
         return LinearTransform(self.arguments, new_scales, new_shifts, self.child)
 
-    def apply_shift(self, shift_vec: Tuple[int, ...]) -> LinearTransform:
-        if len(shift_vec) != len(self.shifts):
-            raise ValueError("shift vector must have same length as shifts")
-        new_shifts = tuple(sh + delta for sh, delta in zip(self.shifts, shift_vec))
+    def apply_shift(self, delta: Tuple[int, ...]) -> LinearTransform:
+        new_shifts = tuple(sh + d for sh, d in zip(self.shifts, delta))
         return LinearTransform(self.arguments, self.scales, new_shifts, self.child)
-
-    @property
-    def children(self) -> Tuple[IRNode, ...]:
-        return (self.child,)
 
 
 def push_linear_transform(ltf: LinearTransform) -> IRNode:
     child = ltf.child
-
-    # Base cases - cannot push further
-    if isinstance(child, (Identifier, VectorSpace, FiniteSet, SimpleGuard)):
-        return ltf
-    
-    # Special case: ProductDomain ignores LTF
-    if isinstance(child, ProductDomain):
-        return child
-    
-    # Absorption cases
+    # Base cases
+    if isinstance(child, (Identifier, VectorSpace, FiniteSet, SimpleGuard, ProductDomain)):
+        return child if isinstance(child, ProductDomain) else ltf
+    # Absorption
     if isinstance(child, LinearScale):
         new_ltf = ltf.apply_scale(child.factor.comps)
-        return push_linear_transform(LinearTransform(new_ltf.arguments, new_ltf.scales, new_ltf.shifts, child.scaled_set))
-    
+        return push_linear_transform(replace(new_ltf, child=child.scaled_set))
     if isinstance(child, Shift):
         new_ltf = ltf.apply_shift(child.shift.comps)
-        return push_linear_transform(LinearTransform(new_ltf.arguments, new_ltf.scales, new_ltf.shifts, child.shifted_set))
-    
-    # Distribute over set operators
-    if isinstance(child, UnionSet):
-        transformed_parts = [push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, part)) 
-                           for part in child.parts]
-        return UnionSet(parts=tuple(transformed_parts)) #type: ignore
-    
-    if isinstance(child, UnionSpace):
-        # Push transform into each part of the union space
-        transformed_parts = [push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, part)) 
-                           for part in child.parts]
-        return UnionSpace(parts=tuple(transformed_parts))#type: ignore
-    
-    if isinstance(child, IntersectionSet):
-        transformed_parts = [push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, part)) 
-                           for part in child.parts]
-        return IntersectionSet(parts=tuple(transformed_parts))#type: ignore
-    
+        return push_linear_transform(replace(new_ltf, child=child.shifted_set))
+    # Distribute into set operators
+    if isinstance(child, UnionSet) or isinstance(child, UnionSpace) or isinstance(child, IntersectionSet):
+        parts = child.parts
+        transformed = [push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, p)) for p in parts]
+        if isinstance(child, UnionSet):
+            return UnionSet(parts=tuple(transformed)) #type: ignore
+        if isinstance(child, UnionSpace):
+            return UnionSpace(parts=tuple(transformed)) #type: ignore
+        return IntersectionSet(parts=tuple(transformed)) #type: ignore 
     if isinstance(child, DifferenceSet):
-        m_trans = push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, child.minuend))
-        s_trans = push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, child.subtrahend))
-        return DifferenceSet(minuend=m_trans, subtrahend=s_trans)#type: ignore
-    
+        return DifferenceSet(
+            minuend=push_linear_transform(LinearTransform.identity(ltf.arguments, child.minuend)), #type: ignore
+            subtrahend=push_linear_transform(LinearTransform.identity(ltf.arguments, child.subtrahend)) #type: ignore
+        )
     if isinstance(child, ComplementSet):
-        c_trans = push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, child.complemented_set))
-        return ComplementSet(complemented_set=c_trans)#type: ignore
-    
+        return ComplementSet(
+            complemented_set=push_linear_transform(LinearTransform.identity(ltf.arguments, child.complemented_set)) #type: ignore
+        )
     if isinstance(child, SetComprehension):
-        d_trans = push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, child.domain))
-        g_trans = push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, child.guard))
-        return SetComprehension(child.arguments, d_trans, g_trans)#type: ignore
-    
-    if isinstance(child, SetGuard):
-        if child.set_expr is not None:
-            n_trans = push_linear_transform(LinearTransform(ltf.arguments, ltf.scales, ltf.shifts, child.set_expr))
-            return SetGuard(arguments=child.arguments, set_expr=n_trans)#type: ignore
-        return child
-    
-    # Cases that should not occur or are errors
-    if isinstance(child, (Vector, Scalar)):
-        raise ValueError(f"Cannot apply linear transform to {type(child).__name__}")
-    
-    if isinstance(child, SMTGuard):
-        raise ValueError("Cannot apply linear transform to SMTGuard")
-    
-    # Fallback for unhandled cases
-    raise NotImplementedError(f"Linear transform pushdown not implemented for {type(child).__name__}")
+        return SetComprehension(
+            child.arguments,
+            push_linear_transform(LinearTransform.identity(ltf.arguments, child.domain)), #type: ignore
+            push_linear_transform(LinearTransform.identity(ltf.arguments, child.guard)) #type: ignore
+        )
+    if isinstance(child, SetGuard) and child.set_expr is not None:
+        return SetGuard(
+            arguments=child.arguments,
+            set_expr=push_linear_transform(LinearTransform.identity(ltf.arguments, child.set_expr)) #type: ignore
+        )
+    raise NotImplementedError(f"LT pushdown not implemented for {type(child).__name__}")
 
-
+# -----------------------------------------------------------------------------
+# Top-level optimization
+# -----------------------------------------------------------------------------
 def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
-    total_nodes = fold_ir(
-        ir,
-        scopes,
-        lambda node, child_counts: 1 + sum(child_counts)
-    )
-    print(f"Total nodes: {total_nodes}")
-
-    usages = fold_ir(ir, scopes, count_identifiers)
-    once_used_ids = {id for id, count in usages.items() if count == 1 and scopes.lookup_by_id(id) is not None}
-
-    print(f"Inlining {len(once_used_ids)} definitions")
-    if not once_used_ids:
-        return ir
-
-    to_preprocess = {
-        def_id: tree
-        for def_id, tree in scopes.parsed_ids.items()
-        if def_id not in once_used_ids
-    }
-    
-    if to_preprocess:
-        print(f"Batch preprocessing {len(to_preprocess)} definitions")
-        new_id_mapping = preprocess_definitions_batch(to_preprocess, once_used_ids, scopes)
-        
-        # Patch lookup_by_id to use preprocessed definitions
-        orig_lookup = scopes.lookup_by_id
-        def lookup_by_id_patched(id: int) -> Optional[IRNode]:
-            if id in new_id_mapping:
-                return new_id_mapping[id]
-            return orig_lookup(id)
-        scopes.lookup_by_id = lookup_by_id_patched
-
-    print("Done preprocessing")
-
-    inlined_ir = map_ir_with_inlining(ir, scopes, once_used_ids)
-
-    print("Inline complete")
-    print(inlined_ir)
-
-    # Apply linear transform pushdown
-    print("Pushing down linear transformations")
-    if isinstance(inlined_ir, SetComprehension):
-        ltf = LinearTransform.identity(inlined_ir.arguments, inlined_ir)
-        ltf_ir = push_linear_transform(ltf)
-        return ltf_ir
-    
-    return inlined_ir
+    logger.info("Starting optimization")
+    total = fold_ir(ir, scopes, lambda n, cs: 1 + sum(cs))
+    logger.debug("Total IR nodes: %d", total)
+    once = find_once_used_ids(ir, scopes)
+    if once:
+        logger.debug("Inlining %d once-used identifiers", len(once))
+        ir = inline_identifiers(ir, scopes, once)
+    else:
+        logger.debug("No identifiers to inline")
+    if isinstance(ir, SetComprehension):
+        ltf = LinearTransform.identity(ir.arguments, ir)
+        ir = push_linear_transform(ltf)
+        logger.info("Applied linear transform pushdown")
+    logger.info("Optimization complete")
+    return ir
