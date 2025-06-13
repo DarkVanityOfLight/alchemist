@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 from expressions import (
     Argument, IRNode, Identifier, ProductDomain, VectorSpace, FiniteSet,
-    UnionSet, IntersectionSet, DifferenceSet, ComplementSet,
+    UnionSet, IntersectionSet, ComplementSet,
     LinearScale, Shift, SetComprehension, SymbolicSet, Vector, Scalar, UnionSpace
 )
 from collections import Counter
@@ -85,8 +85,6 @@ def reconstruct_node(node: IRNode, new_children: List[IRNode]) -> IRNode:
         return replace(node, parts=tuple(new_children))
     if isinstance(node, IntersectionSet):
         return replace(node, parts=tuple(new_children))
-    if isinstance(node, DifferenceSet):
-        return replace(node, minuend=new_children[0], subtrahend=new_children[1])
     if isinstance(node, ComplementSet):
         return replace(node, complemented_set=new_children[0])
     if isinstance(node, SetGuard) and node.set_expr is not None:
@@ -189,11 +187,6 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
         if isinstance(child, UnionSpace):
             return UnionSpace(parts=tuple(transformed)) #type: ignore
         return IntersectionSet(parts=tuple(transformed)) #type: ignore 
-    if isinstance(child, DifferenceSet):
-        return DifferenceSet(
-            minuend=push_linear_transform(LinearTransform.identity(ltf.arguments, child.minuend)), #type: ignore
-            subtrahend=push_linear_transform(LinearTransform.identity(ltf.arguments, child.subtrahend)) #type: ignore
-        )
     if isinstance(child, ComplementSet):
         return ComplementSet(
             complemented_set=push_linear_transform(LinearTransform.identity(ltf.arguments, child.complemented_set)) #type: ignore

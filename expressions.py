@@ -197,19 +197,6 @@ class IntersectionSet(SymbolicSet):
         return self.parts[0].dimension
 
 @dataclass(frozen=True)
-class DifferenceSet(SymbolicSet):
-    minuend: SymbolicSet
-    subtrahend: SymbolicSet
-
-    @property
-    def children(self) -> Tuple[SymbolicSet, ...]:
-        return (self.minuend, self.subtrahend)
-
-    @property
-    def dimension(self) -> int:
-        return self.minuend.dimension
-
-@dataclass(frozen=True)
 class ComplementSet(SymbolicSet):
     complemented_set: SymbolicSet
 
@@ -280,6 +267,9 @@ class SetComprehension(SymbolicSet):
     @property
     def dimension(self) -> int:
         return len(self.arguments)
+
+def make_difference(minuend: SymbolicSet, subtrahend: SymbolicSet):
+    return IntersectionSet((minuend, ComplementSet(subtrahend)))
 
 # This one is a bit special
 # We trust that its expression is in scope

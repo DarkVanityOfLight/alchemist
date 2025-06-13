@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import typing
 
 from arm_ast import BASE_SET_TYPES, NodeType
-from expressions import Argument, ComplementSet, DifferenceSet, IRNode, Identifier, IntersectionSet, LinearScale, ProductDomain, Scalar, SetComprehension, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type
+from expressions import Argument, ComplementSet, IRNode, Identifier, IntersectionSet, LinearScale, ProductDomain, Scalar, SetComprehension, Shift, SymbolicSet, UnionSet, Vector, VectorSpace, domain_from_node_type, make_difference
 from guards import SetGuard, SimpleGuard
 from scope_handler import ScopeHandler
 
@@ -694,7 +694,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
         case NodeType.INTERSECTION: return IntersectionSet(tuple(operands))
         case NodeType.DIFFERENCE:
             assert len(operands) == 2, f"Can only build a difference of two sets got {len(operands)}"
-            return DifferenceSet(operands[0], operands[1])
+            return make_difference(operands[0], operands[1])
         case NodeType.COMPLEMENT: 
             assert len(operands) == 1, f"Can only build the complement of one set got {len(operands)}"
             return ComplementSet(operands[0])
@@ -702,7 +702,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
             assert len(operands) == 2, f"Can only build a XOR of two sets got {len(operands)}"
             minuend = UnionSet(tuple(operands))
             subtrahend = IntersectionSet(tuple(operands))
-            return DifferenceSet(minuend, subtrahend)
+            make_difference(minuend, subtrahend)
         case NodeType.CARTESIAN_PRODUCT: pass
 
     match node.type:
