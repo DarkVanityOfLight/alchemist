@@ -702,7 +702,7 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
             assert len(operands) == 2, f"Can only build a XOR of two sets got {len(operands)}"
             minuend = UnionSet(tuple(operands))
             subtrahend = IntersectionSet(tuple(operands))
-            make_difference(minuend, subtrahend)
+            return make_difference(minuend, subtrahend)
         case NodeType.CARTESIAN_PRODUCT: pass
 
     match node.type:
