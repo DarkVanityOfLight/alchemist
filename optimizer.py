@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 from expressions import (
     Argument, IRNode, Identifier, ProductDomain, Scalar, UnionSpace, Vector, VectorSpace, FiniteSet, UnionSet, IntersectionSet,
     DifferenceSet, ComplementSet, LinearScale, Shift, SetComprehension, SymbolicSet
@@ -10,7 +10,6 @@ from dataclasses import dataclass, replace
 from guards import Guard, SMTGuard, SetGuard, SimpleGuard
 if TYPE_CHECKING:
     from scope_handler import ScopeHandler
-
 
 _inlined = 0
 _semantic_children_cache = {}
@@ -88,6 +87,30 @@ def map_ir(node: IRNode,
     # Return the transformed result (don't short-circuit based on identity)
     return result
 
+def map_ir_pruned(
+    node: IRNode,
+    scopes: ScopeHandler,
+    fn: Callable[[IRNode, List[IRNode]], IRNode],
+    once_used_ids: Set[int],
+    memo: Optional[Dict[int, IRNode]] = None
+) -> IRNode:
+    if memo is None:
+        memo = {}
+    key = id(node)
+    if key in memo:
+        return memo[key]
+
+    # PRUNE: if this is an Identifier we won't inline, just return it
+    if isinstance(node, Identifier) and node.ptr not in once_used_ids:
+        memo[key] = node
+        return node
+
+    # Otherwise, behave just like your usual map_ir
+    kids = semantic_children(node, scopes)
+    new_kids = [map_ir_pruned(ch, scopes, fn, once_used_ids, memo) for ch in kids]
+    result = fn(node, new_kids)
+    memo[key] = result
+    return result
 
 def count_identifiers(node: IRNode, child_counts: Tuple[Counter, ...]) -> Counter:
     """
@@ -133,7 +156,6 @@ def inline_mapper(node: IRNode, new_children: List[IRNode],
     if isinstance(node, Identifier) and node.ptr in once_used_ids:
         global _inlined
         _inlined += 1
-        # print(_inlined)
         definition = scopes.lookup_by_id(node.ptr)
         if definition:
             def recursive_mapper(inner_node: IRNode, inner_children: List[IRNode]) -> IRNode:
@@ -270,26 +292,61 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
 
     raise NotImplementedError(f"Did not implement LTF pushdown for node: {child}")
 
-def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
-    # total_nodes = fold_ir(
-    #     ir,
-    #     scopes,
-    #     lambda node, child_counts: 1 + sum(child_counts)
-    # )
 
-    usages = fold_ir(ir, scopes, count_identifiers)
-    once_used_ids = {id for id, count in usages.items() if count == 1 and scopes.lookup_by_id(id) is not None}
-
-    print(f"Inlining {len(once_used_ids)} definitions")
-
-    if not once_used_ids:
-        return ir
+def preprocess_multiple_used_definition(
+    node: IRNode,
+    once_used_ids: Set[int],
+    scopes: ScopeHandler,
+) -> IRNode:
 
     def mapper(node: IRNode, new_children: List[IRNode]) -> IRNode:
         result = inline_mapper(node, new_children, once_used_ids, scopes)
         return result
 
-    inlined_ir = map_ir(ir, scopes, mapper)
+    inlined_ir = map_ir(node, scopes, mapper)
+
+    return inlined_ir
+
+
+def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
+    total_nodes = fold_ir(
+        ir,
+        scopes,
+        lambda node, child_counts: 1 + sum(child_counts)
+    )
+    print(total_nodes)
+
+    usages = fold_ir(ir, scopes, count_identifiers)
+    once_used_ids = {id for id, count in usages.items() if count == 1 and scopes.lookup_by_id(id) is not None}
+
+    print(f"Inlining {len(once_used_ids)} definitions")
+    if not once_used_ids:
+        return ir
+
+    to_preprocess = {
+            def_id: tree
+            for def_id, tree in scopes.parsed_ids.items()
+            if def_id not in once_used_ids
+        }
+    new_id_mapping: Dict[int, IRNode] = {
+        def_id: preprocess_multiple_used_definition(tree, once_used_ids, scopes)
+        for def_id, tree in to_preprocess.items()
+    }
+
+    # ——— patch lookup_by_id ———
+    orig_lookup = scopes.lookup_by_id
+    def lookup_by_id_patched(id: int) -> Optional[IRNode]:
+        if id in new_id_mapping:
+            return new_id_mapping[id]
+        return orig_lookup(id)
+    scopes.lookup_by_id = lookup_by_id_patched
+
+    inlined_ir = map_ir_pruned(
+        ir, scopes,
+        lambda node, kids: inline_mapper(node, kids, once_used_ids, scopes),
+        once_used_ids
+    )
+
     print("Inline complete")
     print(inlined_ir)
 
