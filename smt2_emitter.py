@@ -1,11 +1,12 @@
 from __future__ import annotations
+from functools import reduce
 from typing import Dict, Set, Tuple
 from arm_ast import ASTNode, NodeType
 from expressions import BaseDomain, ComplementSet, FiniteSet, IRNode, IntersectionSet, ProductDomain, SetComprehension, UnionSet, UnionSpace, Vector, VectorSpace, smt2_domain_from_base_domain
 from guards import SimpleGuard
 from optimizer import LinearTransform, get_annotations, is_annotated
 
-from math import lcm
+from math import lcm, gcd
 
 
 SumOfTerms = Dict[str, int]
@@ -248,34 +249,50 @@ def emit_set_comprehension(node: SetComprehension, args: Tuple[str, ...]) -> str
 
 
 def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
-    """
-    Generates the condition for a transformed VectorSpace.
-    """
     vector_space = node.child
-    assert isinstance(vector_space, VectorSpace)
-    scales = node.scales
-    shifts = node.shifts
-    
-    num_dims = vector_space.dimension
-    unconstrained_dims = set()
-    for basis_vec in vector_space.basis:
-        for i in range(num_dims):
-            if basis_vec[i] != 0:
-                unconstrained_dims.add(i)
+    assert isinstance(vector_space, VectorSpace), "Child must be a VectorSpace"
+    dim = vector_space.dimension
+    if len(args) != dim:
+        raise ValueError(f"Args length {len(args)} != vector space dimension {dim}")
+
+    # Inline computation of per-dimension lattice steps from basis
+    basis_scales = []
+    for i in range(dim):
+        entries = [abs(vec[i]) for vec in vector_space.basis if vec[i] != 0]
+        step = reduce(gcd, entries) if entries else 1
+        basis_scales.append(step)
+
+    # Inline detection of unconstrained dimensions
+    unconstrained_dims: Set[int] = {
+        i for i in range(dim)
+        if all(vec[i] == 0 for vec in vector_space.basis)
+    }
 
     conditions = []
-    for i in range(num_dims):
-        arg = args[i]
-        scale = scales[i]
-        shift = shifts[i]
+    for i in range(dim):
+        name = args[i]
+        shift = node.shifts[i]
+        scale = basis_scales[i] * node.scales[i]
 
-        if i in unconstrained_dims:
-            if shift == 0:
-                conditions.append(f"(= (mod {arg} {scale}) 0)")
-            else:
-                conditions.append(f"(= (mod (- {arg} {shift}) {scale}) 0)")
+        if i in unconstrained_dims or scale == 1:
+            # Fixed coordinate (or trivial scale) ⇒ exact match to shift
+            conditions.append(f"(= {name} {shift})")
         else:
-            conditions.append(f"(= {arg} {shift})")
+            # Variable coordinate ⇒ modular constraint
+            if shift == 0:
+                conditions.append(f"(= (mod {name} {scale}) 0)")
+            else:
+                conditions.append(f"(= (mod (- {name} {shift}) {scale}) 0)")
+
+    if is_annotated(node.child):
+        ann = get_annotations(node.child)
+        if 'mod_guard' in ann:
+            scales = ann['mod_guard']
+            for i, scale in enumerate(scales):
+                if i < len(args) and scale > 0:
+                    name = args[i]
+                    # Add mod guard constraint
+                    conditions.append(f"(= (mod {name} {scale}) 0)")
 
     return f"(and {' '.join(conditions)})"
 
@@ -284,22 +301,44 @@ def emit_linear_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
     """
     Handle LinearTransform nodes.
     """
-    # Check if child is SetComprehension with SimpleGuard
-    if isinstance(node.child, SetComprehension):
-        assert False, "Hit weird case"
+    # Check for mod_guard annotations first
+    guards = []
+    if is_annotated(node):
+        ann = get_annotations(node)
+        if 'mod_guard' in ann:
+            scales = ann['mod_guard']
+            for i, scale in enumerate(scales):
+                if i < len(args) and scale > 0:
+                    guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
+
+    # Handle different child types
+    if isinstance(node.child, VectorSpace):
+        body = emit_vector_space_transform(node, args)
+    elif isinstance(node.child, SetComprehension):
         set_comp = node.child
         if isinstance(set_comp.guard, SimpleGuard):
-            return emit_linear_transformed_set_comprehension(node, args)
-    if isinstance(node.child, SimpleGuard):
-        return emit_guard_condition(node.child, node, args)
-    
-    # For other cases, recurse down
+            # Add mod_guard annotations from the SetComprehension node
+            if is_annotated(set_comp):
+                ann_child = get_annotations(set_comp)
+                if 'mod_guard' in ann_child:
+                    scales_child = ann_child['mod_guard']
+                    for i, scale in enumerate(scales_child):
+                        if i < len(args) and scale > 0:
+                            guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
+            
+            body = emit_guard_condition(set_comp.guard, node, args)
+        else:
+            # For other guard types, recurse normally
+            body = emit_node(node.child, args)
+    else:
+        # For other child types, recurse normally
+        body = emit_node(node.child, args)
 
-    if isinstance(node.child, VectorSpace):
-        return emit_vector_space_transform(node, args)
-    assert False, f"Can not linear transform {node.child}"
-
-    return emit_node(node.child, args)
+    # Combine guards and body
+    if guards:
+        return f"(and {' '.join(guards)} {body})"
+    else:
+        return body
 
 def emit_guard_condition(guard: SimpleGuard, lt: LinearTransform | None, args: Tuple[str, ...]) -> str:
     """
