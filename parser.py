@@ -7,7 +7,7 @@ armoise_syntax_tree = None
 armoise_current_line = 1
 armoise_current_filename = ""
 armoise_number_of_errors = 0
-MAX_NB_SYNTAX_ERROR = 1000
+MAX_NB_SYNTAX_ERROR = 1
 
 def U_NE(node_type, child, line):
     return ASTNode(node_type, ValueType.EMPTY, None, line, armoise_current_filename, child, None)
@@ -398,5 +398,11 @@ def s_make_range(minv, maxv, in_nat):
     in_node = B_NE(NodeType.IN, proto, domain, 0)
     return B_NE(NodeType.SET, in_node, and_node, 0)
 
-parser = yacc.yacc(debug=True)
+parser = yacc.yacc(
+    debug=False,          # Disable debug output for production
+    optimize=True,        # Enable optimization features
+    tabmodule='armoise_parsetab',  # Specifies cache file name
+    outputdir='',         # Save cache in current directory
+    write_tables=True     # Force table generation/caching
+)
 
