@@ -58,7 +58,7 @@ def main():
 
     combined_buffer = []
     for fname in args.files:
-        logging.info("Processing file: %s", fname)
+        # logging.info("Processing file: %s", fname)
         ast: Optional[ASTNode] = cast(Optional[ASTNode], parse_file(fname))
         if ast is None:
             logging.error("Skipping due to parse errors: %s", fname)
