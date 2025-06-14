@@ -132,3 +132,24 @@ class ASTNode:
 
 def is_base_set(node: ASTNode) -> bool:
     return node.type in BASE_SET_TYPES
+
+# Helper functions to create ASTNodes
+def make_int_node(value: int) -> ASTNode:
+    return ASTNode(NodeType.INTEGER, ValueType.INT, value, None, None, None, None)
+
+def make_identifier_node(name: str, sibling: ASTNode | None) -> ASTNode:
+    return ASTNode(NodeType.IDENTIFIER, ValueType.ID, name, None, None, None, sibling)
+
+def make_operation_node(node_type: NodeType, operands: List[ASTNode]) -> ASTNode:
+    if not operands:
+        raise ValueError(f"Operation {node_type} requires at least one operand.")
+
+    root_op_node = ASTNode(node_type, ValueType.EMPTY, None, None, None, None, None)
+    
+    # Link the operands as children
+    root_op_node.child = operands[0]
+    current_child = root_op_node.child
+    for i in range(1, len(operands)):
+        current_child.next = operands[i]
+        current_child = current_child.next
+    return root_op_node
