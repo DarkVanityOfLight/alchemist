@@ -1,9 +1,11 @@
 import sys
 from typing import cast
 from arm_ast import ASTNode
+from irparsers import convert
 from lexer import lexer
+from optimizer import optimize
 from parser import parser, armoise_syntax_tree, armoise_current_filename
-from to_smt2 import convert
+from smt2_emitter import emit
 
 def parse_file(filename):
     global armoise_current_filename
@@ -33,10 +35,11 @@ if __name__ == "__main__":
     
     source_file = sys.argv[1]
     ast : ASTNode = cast(ASTNode, parse_file(source_file))
-    # ast.print_tree()
+    ir, scopes = convert(ast)
+    optimized_ir = optimize(ir, scopes)
+    print(emit(optimized_ir))
 
-    ir = convert(ast)
-    print(ir)
+
 
     # ir = convert(ast)
     #
