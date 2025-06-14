@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Set, Tuple
 from arm_ast import ASTNode, NodeType
-from expressions import BaseDomain, ComplementSet, FiniteSet, IRNode, IntersectionSet, ProductDomain, SetComprehension, UnionSet, UnionSpace, Vector, VectorSpace
+from expressions import BaseDomain, ComplementSet, FiniteSet, IRNode, IntersectionSet, ProductDomain, SetComprehension, UnionSet, UnionSpace, Vector, VectorSpace, smt2_domain_from_base_domain
 from guards import SimpleGuard
 from optimizer import LinearTransform, get_annotations, is_annotated
 
@@ -164,18 +164,6 @@ def arithmetic_solver(left_terms: SumOfTerms, left_const: int,
 
     return (new_left, new_right, const)
 
-def emit(node: IRNode) -> str:
-    """
-    Main emit function - entry point for the IR tree.
-    """
-    # First node must be a SetComprehension
-    assert isinstance(node, SetComprehension), f"Expected SetComprehension as root, got {type(node)}"
-    
-    # Extract argument names from the SetComprehension
-    arg_names = tuple(arg.name for arg in node.arguments)
-    
-    # Emit the set comprehension body
-    return emit_node(node, arg_names)
 
 def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
     """
@@ -233,6 +221,7 @@ def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
     else:
         return body
 
+
 def emit_set_comprehension(node: SetComprehension, args: Tuple[str, ...]) -> str:
     """
     Emit SMT for a set comprehension.
@@ -256,6 +245,7 @@ def emit_set_comprehension(node: SetComprehension, args: Tuple[str, ...]) -> str
         return f"(and {domain_smt} {guard_smt})"
     else:
         raise ValueError(f"Unsupported guard type: {type(node.guard)}")
+
 
 def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
     """
@@ -288,6 +278,7 @@ def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) ->
             conditions.append(f"(= {arg} {shift})")
 
     return f"(and {' '.join(conditions)})"
+
 
 def emit_linear_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
     """
@@ -365,6 +356,7 @@ def emit_guard_ast_simple(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ..
         case _:
             raise ValueError(f"Unsupported node type in guard: {node.type}")
 
+
 def emit_relation_simple(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...]) -> str:
     """
     Emit SMT for a relation without linear transformation.
@@ -393,6 +385,7 @@ def emit_relation_simple(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...
         return f"(not (= {lhs_smt} {rhs_smt}))"
     else:
         return f"({smt_relation} {lhs_smt} {rhs_smt})"
+
 
 def ast_node_to_smt(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...]) -> str:
     """
@@ -446,6 +439,7 @@ def ast_node_to_smt(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...]) ->
         case _:
             raise ValueError(f"Unsupported AST node type: {node.type}")
 
+
 def emit_linear_transformed_set_comprehension(node: IRNode, args: Tuple[str, ...]):
     assert isinstance(node, LinearTransform)
     lt = node
@@ -458,6 +452,7 @@ def emit_linear_transformed_set_comprehension(node: IRNode, args: Tuple[str, ...
         return emit_guard_condition(guard, lt, args)
     else:
         raise ValueError(f"Unsupported guard type: {type(guard)}")
+
 
 def emit_guard_ast(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args: Tuple[str, ...]) -> str:
     """
@@ -502,6 +497,7 @@ def emit_guard_ast(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args:
         
         case _:
             raise ValueError(f"Unsupported node type in guard: {node.type}")
+
 
 def emit_relation(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args: Tuple[str, ...]) -> str:
     """
@@ -563,7 +559,6 @@ def emit_relation(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args: 
         return f"({smt_relation} {sum_of_terms} {s_rhs})"
 
 
-
 def emit_product_domain(node: ProductDomain, args: Tuple[str, ...]) -> str:
     """
     Emit SMT constraints for a ProductDomain.
@@ -599,3 +594,25 @@ def emit_product_domain(node: ProductDomain, args: Tuple[str, ...]) -> str:
     else:
         # Multiple constraints - combine with AND
         return f"(and {' '.join(constraints)})"
+
+
+def emit(node: IRNode, relation_name: str) -> str:
+    """
+    Main emit function - entry point for the IR tree.
+    Emits SMT-LIB code for the given IR node.
+    """
+    # First node must be a SetComprehension
+    assert isinstance(node, SetComprehension), f"Expected SetComprehension as root, got {type(node)}"
+    assert isinstance(node.domain, ProductDomain), f"Expected ProductDomain as domain in root, got {type(node.domain)}"
+
+    # Extract argument names and types
+    arg_names = tuple(arg.name for arg in node.arguments)
+    arg_types = tuple(smt2_domain_from_base_domain(t) for t in node.domain.types)
+
+    # Combine names and types for SMT argument declarations
+    arg_decls = ' '.join(f'({name} {typ})' for name, typ in zip(arg_names, arg_types))
+
+    # Emit the body of the relation
+    relation = emit_node(node, arg_names)
+
+    return f"(define-fun {relation_name} ({arg_decls}) Bool {relation})"

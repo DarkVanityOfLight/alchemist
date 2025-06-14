@@ -38,10 +38,13 @@ def parse_file(filename: str) -> Optional[ASTNode]:
 
 def main():
     parser_cli = argparse.ArgumentParser(
-        description="Alchemist: Parse, optimize, and emit SMT2 from Armoise files"
+        description="Alchemist: Parse, optimize, and emit SMT-LIB2 from Armoise source files."
     )
     parser_cli.add_argument(
         "files", nargs='+', help="One or more source files to compile"
+    )
+    parser_cli.add_argument(
+        "-r", "--relation-name", default="R", help="Set the output relation name default is R"
     )
     parser_cli.add_argument(
         "-o", "--output", help="Write output to file (defaults to STDOUT)"
@@ -70,7 +73,7 @@ def main():
         optimized_ir = optimize(ir, scopes)
         logging.debug("Optimized IR: %s", optimized_ir)
 
-        smt_output = emit(optimized_ir)
+        smt_output = emit(optimized_ir, args.relation_name)
         combined_buffer.append(smt_output)
 
     final_output = "\n".join(combined_buffer)

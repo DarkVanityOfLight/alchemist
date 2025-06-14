@@ -43,6 +43,13 @@ def domain_from_node_type(node_type: NodeType) -> BaseDomain:
         case NodeType.NATURALS: return BaseDomain.NAT
         case t: raise ValueError(f"Unknown domain {t}")
 
+def smt2_domain_from_base_domain(base: BaseDomain) -> str:
+    match base:
+        case BaseDomain.INT: return "Int"
+        case BaseDomain.NAT: return "Int"
+        case BaseDomain.REAL: return "Real"
+        case BaseDomain.POS: return "Int"
+
 _global_id_counter = itertools.count(1)
 
 @dataclass(frozen=True)
