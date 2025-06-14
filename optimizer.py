@@ -3,9 +3,9 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tupl
 from expressions import (
     Argument, IRNode, Identifier, ProductDomain, VectorSpace, FiniteSet,
     UnionSet, IntersectionSet, ComplementSet,
-    LinearScale, Shift, SetComprehension, SymbolicSet, Vector, Scalar, UnionSpace
+    LinearScale, Shift, SetComprehension, SymbolicSet, Vector, UnionSpace
 )
-from collections import Counter, defaultdict, deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, replace
 import logging
 
@@ -132,13 +132,10 @@ def build_dependency_graph(
             for child in node.children:
                 collect_definitions(child)
     
-    # Collect all definitions referenced from root
     collect_definitions(root)
     
-    # Build dependency graph by analyzing each definition
     for ptr, def_node in definitions.items():
         dependencies = collect_identifier_pointers(def_node)
-        # Only include dependencies that have definitions in our scope
         graph[ptr] = {dep for dep in dependencies if dep in definitions}
     
     return definitions, graph
@@ -159,14 +156,12 @@ def collect_identifier_pointers(node: IRNode) -> Set[int]:
 
 def topological_sort(graph: Dict[int, Set[int]]) -> List[int]:
     """Return topologically sorted list of identifiers."""
-    # Calculate in-degrees
     in_degree = {node: 0 for node in graph}
     for node, dependencies in graph.items():
         for dep in dependencies:
             if dep in in_degree:
                 in_degree[node] += 1
     
-    # Find nodes with no incoming edges
     queue = deque([node for node, degree in in_degree.items() if degree == 0])
     result = []
     
@@ -174,16 +169,14 @@ def topological_sort(graph: Dict[int, Set[int]]) -> List[int]:
         node = queue.popleft()
         result.append(node)
         
-        # Reduce in-degree for nodes that depend on current node
         for other_node, dependencies in graph.items():
             if node in dependencies:
                 in_degree[other_node] -= 1
                 if in_degree[other_node] == 0:
                     queue.append(other_node)
     
-    # Check for cycles
     if len(result) != len(graph):
-        logger.warning("Circular dependencies detected in identifier graph")
+        logger.debug("Circular dependencies detected in identifier graph")
     
     return result
 
@@ -194,52 +187,40 @@ def inline_all_identifiers(root: IRNode, scopes: ScopeHandler) -> IRNode:
     1. Build complete substitution map in dependency order
     2. Apply all substitutions to root
     """
-    # Pass 1: Collect all definitions and build dependency graph
     definitions, dependency_graph = build_dependency_graph(root, scopes)
     
     if not definitions:
-        logger.info("No definitions found for inlining")
+        logger.debug("No definitions found for inlining")
         return root
     
-    logger.info(f"Found {len(definitions)} definitions to inline")
+    logger.debug("Found %d definitions to inline", len(definitions))
     for ptr, def_node in definitions.items():
-        logger.debug(f"Definition {ptr}: {type(def_node).__name__}")
+        logger.debug("Definition %d: %s", ptr, type(def_node).__name__)
     
-    # Sort definitions in topological order (dependencies first)
     sorted_identifiers = topological_sort(dependency_graph)
-    logger.info(f"Topological order: {sorted_identifiers}")
+    logger.debug("Topological order: %s", sorted_identifiers)
     
-    # Build substitution map by processing definitions in order
-    substitution_map = {}
+    substitution_map: Dict[int, IRNode] = {}
     
     for identifier_ptr in sorted_identifiers:
         if identifier_ptr in definitions:
             original_definition = definitions[identifier_ptr]
-            # Replace identifiers in this definition using current substitution map
             inlined_definition = replace_identifiers(original_definition, substitution_map)
             substitution_map[identifier_ptr] = inlined_definition
-            logger.debug(f"Inlined {identifier_ptr}: {type(original_definition).__name__} -> {type(inlined_definition).__name__}")
+            logger.debug("Inlined %d -> %s", identifier_ptr, type(inlined_definition).__name__)
     
-    logger.info(f"Built substitution map with {len(substitution_map)} entries")
+    logger.debug("Built substitution map with %d entries", len(substitution_map))
     
-    # Pass 2: Apply all substitutions to root
     result = replace_identifiers(root, substitution_map)
     
-    # Check if we still have identifiers in the result
-    remaining_identifiers = collect_identifier_pointers(result)
-    if remaining_identifiers:
-        logger.warning(f"Still have unresolved identifiers after inlining: {remaining_identifiers}")
-        for ptr in remaining_identifiers:
-            if ptr in substitution_map:
-                logger.warning(f"  {ptr} was in substitution map")
-            else:
-                logger.warning(f"  {ptr} was NOT in substitution map")
+    remaining = collect_identifier_pointers(result)
+    if remaining:
+        logger.debug("Unresolved identifiers after inlining: %s", remaining)
     
     return result
 
 
 def replace_identifiers(node: IRNode, substitution_map: Dict[int, IRNode]) -> IRNode:
-    """Recursively replace identifiers using substitution map."""
     if isinstance(node, Identifier) and node.ptr in substitution_map:
         return substitution_map[node.ptr]
     
@@ -293,11 +274,8 @@ def replace_identifiers(node: IRNode, substitution_map: Dict[int, IRNode]) -> IR
         new_children = [replace_identifiers(child, substitution_map) for child in children]
         return reconstruct_node(node, new_children)
     except Exception as e:
-        logger.warning(f"Failed to replace identifiers in {type(node).__name__}: {e}")
+        logger.debug("Failed to replace in %s: %s", type(node).__name__, e)
         return node
-
-
-
 
 # -----------------------------------------------------------------------------
 # LinearTransform pushdown
@@ -408,17 +386,12 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
 # -----------------------------------------------------------------------------
 def optimize(ir: IRNode, scopes: ScopeHandler) -> IRNode:
     """Optimized version using two-pass inlining."""
-    logger.info("Starting optimization")
-    
-    # Inline all identifiers using two-pass approach
+    logger.debug("Starting optimization")
     ir = inline_all_identifiers(ir, scopes)
-    logger.info("Inlined all identifiers")
-    
-    # Apply linear transform pushdown if applicable
+    logger.debug("Inlined all identifiers")
     assert isinstance(ir, SetComprehension)
     ltf = LinearTransform.identity(ir.arguments, ir)
     ir = push_linear_transform(ltf)
-    logger.info("Applied linear transform pushdown")
-    
-    logger.info("Optimization complete")
+    logger.debug("Applied linear transform pushdown")
+    logger.debug("Optimization complete")
     return ir
