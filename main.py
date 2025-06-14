@@ -38,7 +38,7 @@ def parse_file(filename: str) -> Optional[ASTNode]:
 
 def main():
     parser_cli = argparse.ArgumentParser(
-        description="Armoise Compiler: Parse, optimize, and emit SMT2 from source files"
+        description="Alchemist: Parse, optimize, and emit SMT2 from Armoise files"
     )
     parser_cli.add_argument(
         "files", nargs='+', help="One or more source files to compile"
