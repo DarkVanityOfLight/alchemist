@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # FIXME: The annotation of a node is lost if the node is eliminated from the tree
-# instead push it on the child node
+# instead push it on the child node.
 
 # -----------------------------------------------------------------------------
 # Core traversal utilities
@@ -344,6 +344,11 @@ def get_annotations(node: IRNode) -> dict[str, Any]:
         return object.__getattribute__(node, 'meta')
     return {}
 
+def collect_existing_scales(node: IRNode) -> List[Tuple[int, ...]]:
+    """Collect existing mod_guard scales from annotations."""
+    annotations = get_annotations(node)
+    return annotations.get("mod_guard", [])
+
 def push_linear_transform(ltf: LinearTransform) -> IRNode:
     child = ltf.child
     # Base cases
@@ -352,9 +357,11 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
     # Absorption
     if isinstance(child, LinearScale):
         new_ltf = ltf.apply_scale(child.factor.comps)
+        existing_scales = collect_existing_scales(child)
+        all_scales = existing_scales + [child.factor.comps]
         return push_linear_transform(
             replace(new_ltf, child=
-                    Annotated(child.scaled_set, {"mod_guard": new_ltf.scales})))
+                    Annotated(child.scaled_set, {"mod_guard": all_scales})))
     if isinstance(child, Shift):
         new_ltf = ltf.apply_shift(child.shift.comps)
         return push_linear_transform(replace(new_ltf, child=child.shifted_set))

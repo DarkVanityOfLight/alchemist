@@ -1,6 +1,6 @@
 from __future__ import annotations
 from functools import reduce
-from typing import Dict, Set, Tuple
+from typing import Dict, List, Set, Tuple
 from arm_ast import ASTNode, NodeType
 from expressions import BaseDomain, ComplementSet, FiniteSet, IRNode, IntersectionSet, ProductDomain, SetComprehension, UnionSet, UnionSpace, Vector, VectorSpace, smt2_domain_from_base_domain
 from guards import SimpleGuard
@@ -175,11 +175,12 @@ def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
     if is_annotated(node):
         ann = get_annotations(node)
         if 'mod_guard' in ann:
-            scales = ann['mod_guard']  # expected to be a tuple of int scales
-            for i, scale in enumerate(scales):
-                # only emit if scale > 0 and within args
-                if i < len(args) and scale > 0:
-                    guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
+            mod_guards: List[Tuple[int, ...]] = ann['mod_guard']
+            for scales in mod_guards:
+                for i, scale in enumerate(scales):
+                    # only emit if scale > 1 and within args
+                    if i < len(args) and scale > 1:
+                        guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
 
     # emit main body
     match node:
@@ -287,12 +288,12 @@ def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) ->
     if is_annotated(node.child):
         ann = get_annotations(node.child)
         if 'mod_guard' in ann:
-            scales = ann['mod_guard']
-            for i, scale in enumerate(scales):
-                if i < len(args) and scale > 0:
-                    name = args[i]
-                    # Add mod guard constraint
-                    conditions.append(f"(= (mod {name} {scale}) 0)")
+            mod_guards: List[Tuple[int, ...]] = ann['mod_guard']
+            for scales in mod_guards:
+                for i, scale in enumerate(scales):
+                    # only emit if scale > 1 and within args
+                    if i < len(args) and scale > 1:
+                        conditions.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
 
     return f"(and {' '.join(conditions)})"
 
@@ -306,10 +307,12 @@ def emit_linear_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
     if is_annotated(node):
         ann = get_annotations(node)
         if 'mod_guard' in ann:
-            scales = ann['mod_guard']
-            for i, scale in enumerate(scales):
-                if i < len(args) and scale > 0:
-                    guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
+            mod_guards: List[Tuple[int, ...]] = ann['mod_guard']
+            for scales in mod_guards:
+                for i, scale in enumerate(scales):
+                    # only emit if scale > 1 and within args
+                    if i < len(args) and scale > 1:
+                        guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
 
     # Handle different child types
     if isinstance(node.child, VectorSpace):
@@ -319,13 +322,14 @@ def emit_linear_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
         if isinstance(set_comp.guard, SimpleGuard):
             # Add mod_guard annotations from the SetComprehension node
             if is_annotated(set_comp):
-                ann_child = get_annotations(set_comp)
-                if 'mod_guard' in ann_child:
-                    scales_child = ann_child['mod_guard']
-                    for i, scale in enumerate(scales_child):
-                        if i < len(args) and scale > 0:
-                            guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
-            
+                ann = get_annotations(set_comp)
+                if 'mod_guard' in ann:
+                    mod_guards: List[Tuple[int, ...]] = ann['mod_guard']
+                    for scales in mod_guards:
+                        for i, scale in enumerate(scales):
+                            # only emit if scale > 1 and within args
+                            if i < len(args) and scale > 1:
+                                guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
             body = emit_guard_condition(set_comp.guard, node, args)
         else:
             # For other guard types, recurse normally
