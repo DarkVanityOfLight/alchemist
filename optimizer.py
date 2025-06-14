@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# FIXME: The annotation of a node is lost if the node is eliminated from the tree
+# instead push it on the child node
+
 # -----------------------------------------------------------------------------
 # Core traversal utilities
 # -----------------------------------------------------------------------------
@@ -349,7 +352,9 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
     # Absorption
     if isinstance(child, LinearScale):
         new_ltf = ltf.apply_scale(child.factor.comps)
-        return push_linear_transform(replace(new_ltf, child=Annotated(child.scaled_set, {"mod_guard": ltf.scales})))
+        return push_linear_transform(
+            replace(new_ltf, child=
+                    Annotated(child.scaled_set, {"mod_guard": new_ltf.scales})))
     if isinstance(child, Shift):
         new_ltf = ltf.apply_shift(child.shift.comps)
         return push_linear_transform(replace(new_ltf, child=child.shifted_set))
