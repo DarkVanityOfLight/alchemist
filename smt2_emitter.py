@@ -7,7 +7,6 @@ from optimizer import LinearTransform, get_annotations, is_annotated
 
 from math import lcm
 
-#FIXME: Check each node for Annotation and emit additional mod guard
 
 SumOfTerms = Dict[str, int]
 def ast_to_terms(node: ASTNode) -> Tuple[SumOfTerms, int]:
