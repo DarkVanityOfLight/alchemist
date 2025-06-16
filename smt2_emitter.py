@@ -256,14 +256,13 @@ def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) ->
     if len(args) != dim:
         raise ValueError(f"Args length {len(args)} != vector space dimension {dim}")
 
-    # Inline computation of per-dimension lattice steps from basis
+    # Find the smallest step size per dimension
     basis_scales = []
     for i in range(dim):
         entries = [abs(vec[i]) for vec in vector_space.basis if vec[i] != 0]
         step = reduce(gcd, entries) if entries else 1
         basis_scales.append(step)
 
-    # Inline detection of unconstrained dimensions
     unconstrained_dims: Set[int] = {
         i for i in range(dim)
         if all(vec[i] == 0 for vec in vector_space.basis)
@@ -276,10 +275,10 @@ def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) ->
         scale = basis_scales[i] * node.scales[i]
 
         if i in unconstrained_dims or scale == 1:
-            # Fixed coordinate (or trivial scale) ⇒ exact match to shift
+            # Fixed coordinate (or trivial scale) => exact match to shift
             conditions.append(f"(= {name} {shift})")
         else:
-            # Variable coordinate ⇒ modular constraint
+            # Variable coordinate => modular constraint
             if shift == 0:
                 conditions.append(f"(= (mod {name} {scale}) 0)")
             else:
@@ -547,7 +546,7 @@ def emit_relation(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args: 
     Emit SMT for a single relational operator, applying the linear transformation.
     """
     l = lcm(*lt.scales)
-    args_to_insert = [f"(+ (* {l//lt.scales[i]} {args[i]}) {l*lt.shifts[i]})" for i in range(len(args))]
+    args_to_insert = [f"(- (* {l//lt.scales[i]} {args[i]}) {l*lt.shifts[i]})" for i in range(len(args))]
     guard_relation = node.type
     
     # Handle sign flip for negative lcm
