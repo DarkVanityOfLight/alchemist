@@ -186,7 +186,7 @@ def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
     """
     # check for mod_guard annotations and prepare guards
     guards = []
-    guards.append(emit_annotations(node, args))
+    guards += emit_annotations(node, args)
 
     # emit main body
     match node:
@@ -290,7 +290,7 @@ def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) ->
             else:
                 conditions.append(f"(= (mod (- {name} {shift}) {scale}) 0)")
 
-    conditions.append(emit_annotations(node.child, args))
+    conditions += emit_annotations(node.child, args)
 
     return f"(and {' '.join(conditions)})"
 
@@ -301,13 +301,13 @@ def emit_linear_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
     """
     # Check for mod_guard annotations first
     guards = []
-    guards.append(emit_annotations(node, args))
+    guards += emit_annotations(node, args)
 
     # Handle different child types
     if isinstance(node.child, VectorSpace):
         body = emit_vector_space_transform(node, args)
     elif isinstance(node.child, SimpleGuard):
-        guards.append(emit_annotations(node, args))
+        guards += emit_annotations(node, args)
         body = emit_guard_condition(node.child, node, args)
     else:
         # For other child types, recurse normally
