@@ -166,11 +166,7 @@ def arithmetic_solver(left_terms: SumOfTerms, left_const: int,
     return (new_left, new_right, const)
 
 
-def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
-    """
-    Recursively emit SMT for different IR node types, with modulus guards if annotated.
-    """
-    # check for mod_guard annotations and prepare guards
+def emit_annotations(node: IRNode, args: Tuple[str, ...]) -> List[str]:
     guards = []
     if is_annotated(node):
         ann = get_annotations(node)
@@ -181,6 +177,16 @@ def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
                     # only emit if scale > 1 and within args
                     if i < len(args) and scale > 1:
                         guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
+    return guards
+
+
+def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
+    """
+    Recursively emit SMT for different IR node types, with modulus guards if annotated.
+    """
+    # check for mod_guard annotations and prepare guards
+    guards = []
+    guards.append(emit_annotations(node, args))
 
     # emit main body
     match node:
@@ -284,15 +290,7 @@ def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) ->
             else:
                 conditions.append(f"(= (mod (- {name} {shift}) {scale}) 0)")
 
-    if is_annotated(node.child):
-        ann = get_annotations(node.child)
-        if 'mod_guard' in ann:
-            mod_guards: List[Tuple[int, ...]] = ann['mod_guard']
-            for scales in mod_guards:
-                for i, scale in enumerate(scales):
-                    # only emit if scale > 1 and within args
-                    if i < len(args) and scale > 1:
-                        conditions.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
+    conditions.append(emit_annotations(node.child, args))
 
     return f"(and {' '.join(conditions)})"
 
@@ -303,36 +301,14 @@ def emit_linear_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
     """
     # Check for mod_guard annotations first
     guards = []
-    if is_annotated(node):
-        ann = get_annotations(node)
-        if 'mod_guard' in ann:
-            mod_guards: List[Tuple[int, ...]] = ann['mod_guard']
-            for scales in mod_guards:
-                for i, scale in enumerate(scales):
-                    # only emit if scale > 1 and within args
-                    if i < len(args) and scale > 1:
-                        guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
+    guards.append(emit_annotations(node, args))
 
     # Handle different child types
     if isinstance(node.child, VectorSpace):
         body = emit_vector_space_transform(node, args)
-    elif isinstance(node.child, SetComprehension):
-        set_comp = node.child
-        if isinstance(set_comp.guard, SimpleGuard):
-            # Add mod_guard annotations from the SetComprehension node
-            if is_annotated(set_comp):
-                ann = get_annotations(set_comp)
-                if 'mod_guard' in ann:
-                    mod_guards: List[Tuple[int, ...]] = ann['mod_guard']
-                    for scales in mod_guards:
-                        for i, scale in enumerate(scales):
-                            # only emit if scale > 1 and within args
-                            if i < len(args) and scale > 1:
-                                guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
-            body = emit_guard_condition(set_comp.guard, node, args)
-        else:
-            # For other guard types, recurse normally
-            body = emit_node(node.child, args)
+    elif isinstance(node.child, SimpleGuard):
+        guards.append(emit_annotations(node, args))
+        body = emit_guard_condition(node.child, node, args)
     else:
         # For other child types, recurse normally
         body = emit_node(node.child, args)
@@ -342,6 +318,7 @@ def emit_linear_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
         return f"(and {' '.join(guards)} {body})"
     else:
         return body
+
 
 def emit_guard_condition(guard: SimpleGuard, lt: LinearTransform | None, args: Tuple[str, ...]) -> str:
     """
@@ -353,6 +330,7 @@ def emit_guard_condition(guard: SimpleGuard, lt: LinearTransform | None, args: T
         # No linear transformation - emit the guard as-is
         print("This shouldn't happen")
         return emit_guard_ast_simple(guard.node, guard, args)
+
 
 def emit_guard_ast_simple(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...]) -> str:
     """
@@ -624,8 +602,6 @@ def emit_product_domain(node: ProductDomain, args: Tuple[str, ...]) -> str:
             case BaseDomain.POS:
                 # Positive naturals: > 0
                 constraints.append(f"(> {arg_name} 0)")
-            case _:
-                raise ValueError(f"Unknown domain type: {domain_type}")
     
     if not constraints:
         # No constraints needed
