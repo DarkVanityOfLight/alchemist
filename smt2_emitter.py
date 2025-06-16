@@ -1,41 +1,43 @@
 from __future__ import annotations
 from functools import reduce
+import logging
 from typing import Dict, List, Set, Tuple
+from math import lcm, gcd
+
 from arm_ast import ASTNode, NodeType
-from expressions import BaseDomain, ComplementSet, FiniteSet, IRNode, IntersectionSet, ProductDomain, SetComprehension, UnionSet, UnionSpace, Vector, VectorSpace, smt2_domain_from_base_domain
+from expressions import (
+    BaseDomain, ComplementSet, FiniteSet, IRNode, IntersectionSet, 
+    ProductDomain, SetComprehension, UnionSet, UnionSpace, Vector, 
+    VectorSpace, smt2_domain_from_base_domain
+)
 from guards import SimpleGuard
 from optimizer import LinearTransform, get_annotations, is_annotated
 
-from math import lcm, gcd
-
 
 SumOfTerms = Dict[str, int]
+
+
 def ast_to_terms(node: ASTNode) -> Tuple[SumOfTerms, int]:
     """
     Convert an AST representing a linear integer expression into a mapping
     of symbolic terms to coefficients and a constant term.
 
     Args:
-        node (ASTNode): Root of the AST to process.
+        node: Root of the AST to process.
 
     Returns:
-        Tuple[Dict[ASTNode, int], int]: A pair (terms, constant) where `terms` maps
-        each symbolic node to its integer coefficient, and `constant` is the summed
-        integer constant.
+        Tuple containing (terms, constant) where `terms` maps each symbolic 
+        node to its integer coefficient, and `constant` is the summed integer constant.
     """
     def process(n: ASTNode) -> Tuple[Dict[str, int], int]:
-        T = n.type
-        match T:
+        match n.type:
             case NodeType.INTEGER:
-                # For integer constants, no symbolic terms, just return its value
                 return ({}, int(n.value))
 
             case NodeType.IDENTIFIER:
-                # Symbols represent variables; Return a single-term map: this symbol has coefficient 1
                 return ({n.value: 1}, 0)
 
             case NodeType.NEG:
-                # Handle negation: multiply all terms and constant by -1
                 if len(n.children) != 1:
                     raise ValueError("Negation operator expects exactly one operand.")
                 
@@ -44,117 +46,92 @@ def ast_to_terms(node: ASTNode) -> Tuple[SumOfTerms, int]:
                 return (negated_terms, -child_const)
 
             case NodeType.PLUS:
-                # Handle addition: sum up terms and constants from all operands
                 combined_terms: Dict[str, int] = {}
                 combined_const: int = 0
 
-                for term in n.children: # Use n.children to get all direct children
+                for term in n.children:
                     term_terms, term_const = process(term)
-                    # Accumulate constant parts
                     combined_const += term_const
-                    # Merge symbolic terms, adding coefficients
                     for sym, coeff in term_terms.items():
                         combined_terms[sym] = combined_terms.get(sym, 0) + coeff
                 return (combined_terms, combined_const)
 
             case NodeType.MINUS:
-                # Assuming binary minus for simplicity based on original code's arg(0) and arg(1)
-                # The first child is the left operand, the second is the right.
-                children_list = n.children
-                if len(children_list) != 2:
+                if len(n.children) != 2:
                     raise ValueError("Minus operator expects exactly two operands.")
                 
-                left_terms, left_const = process(children_list[0])
-                right_terms, right_const = process(children_list[1])
+                left_terms, left_const = process(n.children[0])
+                right_terms, right_const = process(n.children[1])
 
-                combined_terms = {}
-
-                for sym, coeff in left_terms.items():
-                    combined_terms[sym] = coeff
-
+                combined_terms = dict(left_terms)
                 for sym, coeff in right_terms.items():
-                    if sym in combined_terms:
-                        combined_terms[sym] -= coeff
-                    else:
-                        combined_terms[sym] = -coeff
+                    combined_terms[sym] = combined_terms.get(sym, 0) - coeff
+                
                 return (combined_terms, left_const - right_const)
 
             case NodeType.MUL:
-                # Handle multiplication: only allow one symbolic factor
                 product_terms: Dict[str, int] = {}
                 product_const: int = 1
 
-                for term in n.children: # Use n.children to get all direct children
+                for term in n.children:
                     term_terms, term_const = process(term)
+                    
                     # Disallow multiplication of two non-constant expressions
                     if term_terms and product_terms:
                         raise ValueError(
                             "Invalid multiplication of two non-constant expressions"
                         )
+                    
                     # Scale existing symbolic terms by the new constant
-                    new_terms: Dict[str, int] = {}
-                    for sym, coeff in product_terms.items():
-                        new_terms[sym] = coeff * term_const
-
+                    new_terms = {sym: coeff * term_const for sym, coeff in product_terms.items()}
+                    
                     # Introduce new symbolic terms scaled by the accumulated constant
                     for sym, coeff in term_terms.items():
                         new_coeff = coeff * product_const
                         new_terms[sym] = new_terms.get(sym, 0) + new_coeff
 
-                    # Update constant multiplier
                     product_const *= term_const
                     product_terms = new_terms
+                    
                 return (product_terms, product_const)
 
             case _:
-                # Catch-all for any unrecognized node types
-                raise ValueError(f"Unknown node type: {T}")
+                raise ValueError(f"Unknown node type: {n.type}")
 
     terms, const = process(node)
-    # Clean 0 coeffs
+    # Clean zero coefficients
     return {s: c for s, c in terms.items() if c != 0}, const
+
 
 def arithmetic_solver(left_terms: SumOfTerms, left_const: int,
                       right_terms: SumOfTerms, right_const: int,
                       vars: Set[str]) -> Tuple[SumOfTerms, SumOfTerms, int]:
     """
-    Solve an sum of products for a list of variables.
-    Returns the left side only containing vars and their coefficients,
-    and the right side with vars, coefficients and a constant integer part.
+    Solve an equation for a list of variables.
+    Returns the left side containing vars and their coefficients,
+    and the right side with remaining vars, coefficients and a constant integer part.
     """
+    # Separate variables to solve for vs. others
+    left_vars = {k: v for k, v in left_terms.items() if k in vars}
+    left_others = {k: -v for k, v in left_terms.items() if k not in vars}
+    
+    right_vars = {k: -v for k, v in right_terms.items() if k in vars}
+    right_others = {k: v for k, v in right_terms.items() if k not in vars}
 
-    assert isinstance(vars, set) # Sets speed up the process alot so make sure we get a set
-
-    Lw, Lo = {}, {}
-    for k, v in left_terms.items():
-        if k in vars:
-            Lw[k] = v
-        else:
-            Lo[k] = -v # Is moved to the other side so substracted
-
-    Rw, Ro = {}, {}
-    for k, v in right_terms.items():
-        if k in vars:
-            Rw[k] = -v # Is moved to the other side so substracted
-        else:
-            Ro[k] = v
-
-    # Move all variables with vars to the left
+    # Move all target variables to the left
     new_left = {}
-    # Combine Lw and Rw, handling common keys by adding coefficients
-    for k, v in Lw.items():
-        new_left[k] = v + Rw.get(k, 0)
-    for k, v in Rw.items():
-        if k not in new_left: # Add keys from Lw that were not in Rw
+    for k, v in left_vars.items():
+        new_left[k] = v + right_vars.get(k, 0)
+    for k, v in right_vars.items():
+        if k not in new_left:
             new_left[k] = v
 
-    # Move all variables without vars to the right
+    # Move all other variables to the right
     new_right = {}
-    # Combine Ro and Lo, handling common keys by adding coefficients
-    for k, v in Ro.items():
-        new_right[k] = v + Lo.get(k, 0)
-    for k, v in Lo.items():
-        if k not in new_right: # Add keys from Lo that were not in Ro
+    for k, v in right_others.items():
+        new_right[k] = v + left_others.get(k, 0)
+    for k, v in left_others.items():
+        if k not in new_right:
             new_right[k] = v
 
     const = right_const - left_const
@@ -167,6 +144,7 @@ def arithmetic_solver(left_terms: SumOfTerms, left_const: int,
 
 
 def emit_annotations(node: IRNode, args: Tuple[str, ...]) -> List[str]:
+    """Emit modulus guard annotations for a node."""
     guards = []
     if is_annotated(node):
         ann = get_annotations(node)
@@ -174,21 +152,15 @@ def emit_annotations(node: IRNode, args: Tuple[str, ...]) -> List[str]:
             mod_guards: List[Tuple[int, ...]] = ann['mod_guard']
             for scales in mod_guards:
                 for i, scale in enumerate(scales):
-                    # only emit if scale > 1 and within args
                     if i < len(args) and scale > 1:
-                        guards.append(f"(= (mod {args[i]} {scale}) (mod 0 {scale}))")
+                        guards.append(f"(= (mod {args[i]} {scale}) 0)")
     return guards
 
 
 def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
-    """
-    Recursively emit SMT for different IR node types, with modulus guards if annotated.
-    """
-    # check for mod_guard annotations and prepare guards
-    guards = []
-    guards += emit_annotations(node, args)
+    """Recursively emit SMT for different IR node types, with modulus guards if annotated."""
+    guards = emit_annotations(node, args)
 
-    # emit main body
     match node:
         case SetComprehension():
             body = emit_set_comprehension(node, args)
@@ -216,14 +188,15 @@ def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
         case ProductDomain():
             body = emit_product_domain(node, args)
         case Vector(comps=coords):
-            eqs = []
-            for i, val in enumerate(coords):
-                eqs.append(f"(= {args[i]} {val})")
-            body = "true" if not eqs else f"(and {' '.join(eqs)})"
+            if coords:
+                eqs = [f"(= {args[i]} {val})" for i, val in enumerate(coords)]
+                body = f"(and {' '.join(eqs)})"
+            else:
+                body = "true"
         case _:
             raise ValueError(f"Unsupported IR node type: {type(node).__name__}")
 
-    # combine guards and body
+    # Combine guards and body
     if guards:
         return f"(and {' '.join(guards)} {body})"
     else:
@@ -231,33 +204,48 @@ def emit_node(node: IRNode, args: Tuple[str, ...]) -> str:
 
 
 def emit_set_comprehension(node: SetComprehension, args: Tuple[str, ...]) -> str:
-    """
-    Emit SMT for a set comprehension.
-    For the root set comprehension, we emit the domain and guard conditions.
-    """
-    # For nested set comprehensions, we need to handle the domain and guard
+    """Emit SMT for a set comprehension."""
     domain_smt = emit_node(node.domain, args)
     
-    # Handle different guard types
-    from guards import SimpleGuard, SetGuard
+    from guards import SetGuard
     
     if isinstance(node.guard, SimpleGuard):
         raise ValueError("Found guard without linear transform")
     elif isinstance(node.guard, SetGuard):
-        # Handle set membership guards
         set_expr_smt = emit_node(node.guard.set_expr, args)
         return f"(and {domain_smt} {set_expr_smt})"
     elif isinstance(node.guard, LinearTransform):
-        # Handle LinearTransform as a guard
         guard_smt = emit_node(node.guard, args)
         return f"(and {domain_smt} {guard_smt})"
     else:
         raise ValueError(f"Unsupported guard type: {type(node.guard)}")
 
 
+def emit_linear_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
+    """Handle LinearTransform nodes."""
+    guards = emit_annotations(node, args)
+
+    # Handle different child types
+    if isinstance(node.child, VectorSpace):
+        body = emit_vector_space_transform(node, args)
+    elif isinstance(node.child, SimpleGuard):
+        body = emit_guard_condition(node.child, node, args)
+    else:
+        logging.warning(f"Unhandled linear transformation {node.child}")
+        body = emit_node(node.child, args)
+
+    # Combine guards and body
+    if guards:
+        return f"(and {' '.join(guards)} {body})"
+    else:
+        return body
+
+
 def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
+    """Emit SMT for a LinearTransform applied to a VectorSpace."""
     vector_space = node.child
     assert isinstance(vector_space, VectorSpace), "Child must be a VectorSpace"
+    
     dim = vector_space.dimension
     if len(args) != dim:
         raise ValueError(f"Args length {len(args)} != vector space dimension {dim}")
@@ -269,7 +257,7 @@ def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) ->
         step = reduce(gcd, entries) if entries else 1
         basis_scales.append(step)
 
-    unconstrained_dims: Set[int] = {
+    unconstrained_dims = {
         i for i in range(dim)
         if all(vec[i] == 0 for vec in vector_space.basis)
     }
@@ -281,63 +269,28 @@ def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) ->
         scale = basis_scales[i] * node.scales[i]
 
         if i in unconstrained_dims or scale == 1:
-            # Fixed coordinate (or trivial scale) => exact match to shift
             conditions.append(f"(= {name} {shift})")
         else:
-            # Variable coordinate => modular constraint
             if shift == 0:
                 conditions.append(f"(= (mod {name} {scale}) 0)")
             else:
                 conditions.append(f"(= (mod (- {name} {shift}) {scale}) 0)")
 
-    conditions += emit_annotations(node.child, args)
-
+    conditions.extend(emit_annotations(node.child, args))
     return f"(and {' '.join(conditions)})"
 
 
-def emit_linear_transform(node: LinearTransform, args: Tuple[str, ...]) -> str:
-    """
-    Handle LinearTransform nodes.
-    """
-    # Check for mod_guard annotations first
-    guards = []
-    guards += emit_annotations(node, args)
-
-    # Handle different child types
-    if isinstance(node.child, VectorSpace):
-        body = emit_vector_space_transform(node, args)
-    elif isinstance(node.child, SimpleGuard):
-        guards += emit_annotations(node, args)
-        body = emit_guard_condition(node.child, node, args)
-    else:
-        # For other child types, recurse normally
-        body = emit_node(node.child, args)
-
-    # Combine guards and body
-    if guards:
-        return f"(and {' '.join(guards)} {body})"
-    else:
-        return body
-
-
 def emit_guard_condition(guard: SimpleGuard, lt: LinearTransform | None, args: Tuple[str, ...]) -> str:
-    """
-    Emit SMT for a guard condition, with optional linear transformation.
-    """
+    """Emit SMT for a guard condition, with optional linear transformation."""
     if lt is not None:
         return emit_guard_ast(guard.node, guard, lt, args)
     else:
-        # No linear transformation - emit the guard as-is
-        print("This shouldn't happen")
         return emit_guard_ast_simple(guard.node, guard, args)
 
 
 def emit_guard_ast_simple(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...]) -> str:
-    """
-    Emit SMT for guard AST without linear transformation.
-    """
+    """Emit SMT for guard AST without linear transformation."""
     match node.type:
-        # Logical connectives
         case NodeType.AND:
             children_smt = [emit_guard_ast_simple(child, guard, args) for child in node.children]
             return f"(and {' '.join(children_smt)})"
@@ -363,7 +316,6 @@ def emit_guard_ast_simple(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ..
             right = emit_guard_ast_simple(node.children[1], guard, args)
             return f"(= {left} {right})"
         
-        # Relational operators - emit without transformation
         case NodeType.EQ | NodeType.NEQ | NodeType.LT | NodeType.GT | NodeType.GEQ | NodeType.LEQ:
             return emit_relation_simple(node, guard, args)
         
@@ -378,18 +330,13 @@ def emit_guard_ast_simple(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ..
 
 
 def emit_relation_simple(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...]) -> str:
-    """
-    Emit SMT for a relation without linear transformation.
-    """
+    """Emit SMT for a relation without linear transformation."""
     assert len(node.children) == 2
-    lhs_node = node.children[0]
-    rhs_node = node.children[1]
+    lhs_node, rhs_node = node.children
     
-    # Convert AST nodes to SMT expressions
     lhs_smt = ast_node_to_smt(lhs_node, guard, args)
     rhs_smt = ast_node_to_smt(rhs_node, guard, args)
     
-    # Map NodeType to SMT relation symbols
     relation_map = {
         NodeType.EQ: "=",
         NodeType.NEQ: "distinct",
@@ -408,21 +355,16 @@ def emit_relation_simple(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...
 
 
 def ast_node_to_smt(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...]) -> str:
-    """
-    Convert an AST node to SMT expression.
-    This handles variables, constants, and arithmetic operations.
-    """
+    """Convert an AST node to SMT expression."""
     match node.type:
         case NodeType.IDENTIFIER:
             # Map identifier to corresponding argument
             if hasattr(guard, 'var_names_by_pos'):
                 pos = next(i for i, name in guard.var_names_by_pos.items() if name == node.value)
-                return args[pos]
             else:
-                # Fallback - find position by name
                 var_names = [var.name for var in guard.variables]
                 pos = var_names.index(node.value)
-                return args[pos]
+            return args[pos]
         
         case NodeType.INTEGER:
             return str(node.value)
@@ -434,9 +376,9 @@ def ast_node_to_smt(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...]) ->
         case NodeType.MINUS:
             operands = [ast_node_to_smt(child, guard, args) for child in node.children]
             if len(operands) == 1:
-                return f"(- {operands[0]})"  # Unary minus
+                return f"(- {operands[0]})"
             else:
-                return f"(- {' '.join(operands)})"  # Binary minus
+                return f"(- {' '.join(operands)})"
         
         case NodeType.MUL:
             operands = [ast_node_to_smt(child, guard, args) for child in node.children]
@@ -452,34 +394,15 @@ def ast_node_to_smt(node: ASTNode, guard: SimpleGuard, args: Tuple[str, ...]) ->
         
         case NodeType.POWER:
             operands = [ast_node_to_smt(child, guard, args) for child in node.children]
-            # Note: SMT-LIB doesn't have a standard power operator
-            # This might need special handling depending on the solver
             return f"(^ {' '.join(operands)})"
         
         case _:
             raise ValueError(f"Unsupported AST node type: {node.type}")
 
 
-def emit_linear_transformed_set_comprehension(node: IRNode, args: Tuple[str, ...]):
-    assert isinstance(node, LinearTransform)
-    lt = node
-    set_comp = node.child
-    assert isinstance(set_comp, SetComprehension)
-    guard = set_comp.guard
-    
-    # Handle boolean combinations of (in)equalities
-    if isinstance(guard, SimpleGuard):
-        return emit_guard_condition(guard, lt, args)
-    else:
-        raise ValueError(f"Unsupported guard type: {type(guard)}")
-
-
 def emit_guard_ast(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args: Tuple[str, ...]) -> str:
-    """
-    Recursively walk the guard AST and emit SMT for logical connectives and relations.
-    """
+    """Recursively walk the guard AST and emit SMT for logical connectives and relations."""
     match node.type:
-        # Logical connectives
         case NodeType.AND:
             children_smt = [emit_guard_ast(child, guard, lt, args) for child in node.children]
             return f"(and {' '.join(children_smt)})"
@@ -505,7 +428,6 @@ def emit_guard_ast(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args:
             right = emit_guard_ast(node.children[1], guard, lt, args)
             return f"(= {left} {right})"
         
-        # Relational operators - this is where we apply the linear transformation
         case NodeType.EQ | NodeType.NEQ | NodeType.LT | NodeType.GT | NodeType.GEQ | NodeType.LEQ:
             return emit_relation(node, guard, lt, args)
         
@@ -520,48 +442,48 @@ def emit_guard_ast(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args:
 
 
 def emit_relation(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args: Tuple[str, ...]) -> str:
-    """
-    Emit SMT for a single relational operator, applying the linear transformation.
-    """
+    """Emit SMT for a single relational operator, applying the linear transformation."""
     l = lcm(*lt.scales)
-    args_to_insert = [f"(- (* {l//lt.scales[i]} {args[i]}) {l*lt.shifts[i]})" for i in range(len(args))]
+    args_to_insert = [
+        f"(- (* {l//lt.scales[i]} {args[i]}) {l*lt.shifts[i]})" 
+        for i in range(len(args))
+    ]
     guard_relation = node.type
     
     # Handle sign flip for negative lcm
     if l < 0:
-        match guard_relation:
-            case NodeType.EQ: pass
-            case NodeType.NEQ: pass
-            case NodeType.LT: guard_relation = NodeType.GT
-            case NodeType.GT: guard_relation = NodeType.LT
-            case NodeType.GEQ: guard_relation = NodeType.LEQ
-            case NodeType.LEQ: guard_relation = NodeType.GEQ
+        relation_flip = {
+            NodeType.LT: NodeType.GT,
+            NodeType.GT: NodeType.LT,
+            NodeType.GEQ: NodeType.LEQ,
+            NodeType.LEQ: NodeType.GEQ
+        }
+        guard_relation = relation_flip.get(guard_relation, guard_relation)
     
     assert len(node.children) == 2
-    lhs_node = node.children[0]
-    rhs_node = node.children[1]
+    lhs_node, rhs_node = node.children
     
     sym_lhs, const_lhs = ast_to_terms(lhs_node)
     sym_rhs, const_rhs = ast_to_terms(rhs_node)
-    solved_lhs, _, solved_const = arithmetic_solver(sym_lhs, const_lhs, sym_rhs, const_rhs, {var.name for var in guard.variables})
+    solved_lhs, _, solved_const = arithmetic_solver(
+        sym_lhs, const_lhs, sym_rhs, const_rhs, 
+        {var.name for var in guard.variables}
+    )
     
     ordered_name_keys = [guard.var_names_by_pos[i] for i in range(len(args))]
     
-    # Only include terms for variables that are present in solved_lhs
+    # Build terms for variables present in solved_lhs
     terms = []
     for i, name_key in enumerate(ordered_name_keys):
         if name_key in solved_lhs:
             terms.append(f"(* {solved_lhs[name_key]} {args_to_insert[i]})")
     
-    # Handle case where no terms are present
-    if not terms:
-        sum_of_terms = "0"
-    else:
-        sum_of_terms = f"(+ {' '.join(terms)})" if len(terms) > 1 else terms[0]
+    sum_of_terms = "0" if not terms else (
+        terms[0] if len(terms) == 1 else f"(+ {' '.join(terms)})"
+    )
     
     s_rhs = f"(* {l} {solved_const})"
     
-    # Map NodeType to SMT relation symbols
     relation_map = {
         NodeType.EQ: "=",
         NodeType.NEQ: "distinct",
@@ -580,13 +502,7 @@ def emit_relation(node: ASTNode, guard: SimpleGuard, lt: LinearTransform, args: 
 
 
 def emit_product_domain(node: ProductDomain, args: Tuple[str, ...]) -> str:
-    """
-    Emit SMT constraints for a ProductDomain.
-    Each component type has specific constraints:
-    - INT/REAL: no constraints (true)
-    - NAT: >= 0 
-    - POS: > 0
-    """
+    """Emit SMT constraints for a ProductDomain."""
     constraints = []
     
     for i, domain_type in enumerate(node.types):
@@ -594,23 +510,17 @@ def emit_product_domain(node: ProductDomain, args: Tuple[str, ...]) -> str:
         
         match domain_type:
             case BaseDomain.INT | BaseDomain.REAL:
-                # No constraints for integers and reals
                 continue
             case BaseDomain.NAT:
-                # Natural numbers: >= 0
                 constraints.append(f"(>= {arg_name} 0)")
             case BaseDomain.POS:
-                # Positive naturals: > 0
                 constraints.append(f"(> {arg_name} 0)")
     
     if not constraints:
-        # No constraints needed
         return "true"
     elif len(constraints) == 1:
-        # Single constraint
         return constraints[0]
     else:
-        # Multiple constraints - combine with AND
         return f"(and {' '.join(constraints)})"
 
 
@@ -619,7 +529,6 @@ def emit(node: IRNode, relation_name: str) -> str:
     Main emit function - entry point for the IR tree.
     Emits SMT-LIB code for the given IR node.
     """
-    # First node must be a SetComprehension
     assert isinstance(node, SetComprehension), f"Expected SetComprehension as root, got {type(node)}"
     assert isinstance(node.domain, ProductDomain), f"Expected ProductDomain as domain in root, got {type(node.domain)}"
 
