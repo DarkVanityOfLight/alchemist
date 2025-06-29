@@ -1,6 +1,7 @@
 from __future__ import annotations
 from enum import Enum
 from dataclasses import dataclass
+from types import NotImplementedType
 import typing
 
 from arm_ast import BASE_SET_TYPES, NodeType
@@ -24,12 +25,35 @@ class ParseErrorType(Enum):
     STRUCTURAL_ERROR = "structural_error"
 
 @dataclass
-class ParseError:
+class ParseError(Exception):
     error_type: ParseErrorType
     message: str
     node: Optional[ASTNode] = None
     expected: Optional[Any] = None
     actual: Optional[Any] = None
+
+    def __str__(self):
+        parts = [f"[{self.error_type.value}] {self.message}"]
+
+        if self.node is not None:
+            parts.append(f"At node: {repr(self.node)}")
+
+        if self.expected is not None or self.actual is not None:
+            parts.append(f"Expected: {self.expected}, Actual: {self.actual}")
+
+        return "\n".join(parts)
+
+    def merge_with(self, other: ParseError) -> ParseError:
+        merged_message = (
+            f"Multiple parse attempts failed:\n"
+            f"  1) {self}\n"
+            f"  2) {other}"
+        )
+        return ParseError(
+            error_type=ParseErrorType.STRUCTURAL_ERROR,
+            message=merged_message,
+            node=self.node or other.node,
+        )
 
 @dataclass
 class ParseResult(Generic[T]):
@@ -632,6 +656,14 @@ def parse_shift(node: ASTNode, scopes: ScopeHandler) -> ParseResult[Shift]:
     
     return ParseResult.error_result(ParseError(ParseErrorType.STRUCTURAL_ERROR, "Could not be parsed as shift"))
 
+def parse_parenthesized(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
+    if error := safe_assert_node_type(node, NodeType.PAREN):
+        return ParseResult.error_result(ParseError(ParseErrorType.WRONG_CHILD_TYPE, error.message, node))
+
+    if node.child is None:
+        return ParseResult.error_result(ParseError(ParseErrorType.STRUCTURAL_ERROR, "Parenthesized expression should have children", node))
+    return parse_set_expression(node.child, scopes)
+
 def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
     # Base Cases
     match node.type:
@@ -643,9 +675,20 @@ def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[Sym
         case NodeType.INTEGER: 
             return parse_scalar(node) #type: ignore
         case NodeType.PAREN: 
-            return parse_vector(node) #type: ignore
+            vector_result = parse_vector(node)
+            if vector_result.success:
+                return vector_result #type: ignore
+            paren_result = parse_parenthesized(node, scopes)
+            if paren_result.success:
+                return paren_result
+            
+            return ParseResult.error_result(vector_result.get_error().merge_with(paren_result.get_error()))
 
     operands = [parse_set_expression(child, scopes) for child in node.children]
+
+    for operand in operands:
+        if operand.error:
+            return operand
     operands = [it.get_value() for it in operands]
     
     match node.type:
@@ -683,7 +726,10 @@ def process_definition(node: ASTNode, scopes: ScopeHandler) -> None:
     
     ident = node.child.value
     value = process_predicate(node.child.next, scopes)
-    scopes.add_definition(ident, value.get_value())
+    if value.success:
+        scopes.add_definition(ident, value.get_value())
+    else:
+        raise value.get_error()
 
 def process_predicate_context(node: ASTNode, scopes: ScopeHandler) -> None:
     if error := safe_assert_node_type(node, NodeType.PREDICATE_CONTEXT):
@@ -706,4 +752,7 @@ def convert(ast: ASTNode):
     
     scope_handler = ScopeHandler()
     result = process_predicate(ast, scope_handler)
-    return result.get_value(), scope_handler
+    if result.success:
+        return result.get_value(), scope_handler
+    else:
+        raise result.get_error()
