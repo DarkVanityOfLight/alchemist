@@ -46,6 +46,7 @@ t_IMPLY = r'=>'
 t_EQUIV = r'<=>'
 t_UNION = r'\|\|'
 t_INTERSECTION = r'&&'
+t_AND = r'&'
 t_DOTS = r'\.\.\.'
 t_BACKSLASH = r'\\'
 
