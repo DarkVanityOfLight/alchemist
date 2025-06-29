@@ -9,7 +9,7 @@ from guards import SetGuard, SimpleGuard
 from scope_handler import ScopeHandler
 
 from typing import List, Optional, Tuple, TypeVar, Any, Generic
-T = TypeVar("T")
+T = TypeVar("T", bound=IRNode)
 
 if typing.TYPE_CHECKING:
     from arm_ast import ASTNode
@@ -106,20 +106,9 @@ def parse_vector(node: ASTNode) -> ParseResult[Vector]:
             node=node
         ))
 
-def parse_argument_vector(vector_node: ASTNode) -> ParseResult[Tuple[str, ...]]:
+def parse_argument_vector(vector_node: ASTNode) -> Tuple[str, ...]:
     """Extract member names from a vector node"""
-    if error := safe_assert_node_type(vector_node, NodeType.VECTOR):
-        return ParseResult.error_result(error)
-    
-    try:
-        member_names = tuple(child.value for child in vector_node.children)
-        return ParseResult.success_result(member_names)
-    except Exception as e:
-        return ParseResult.error_result(ParseError(
-            ParseErrorType.INVALID_VALUE,
-            f"Failed to extract vector members: {e}",
-            node=vector_node
-        ))
+    return tuple(child.value for child in vector_node.children)
 
 def parse_domain_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SetComprehension]:
     """Parse domain expressions with error handling"""
@@ -184,13 +173,13 @@ def parse_guard(node: ASTNode, arguments: Tuple[Argument, ...], scopes: ScopeHan
                 return ParseResult.error_result(error)
             
             # Parse the set expression on the right side of IN
-            try:
-                set_expr = parse_set_expression(node.child.next, scopes)
-                return ParseResult.success_result(SetGuard(arguments, set_expr))
-            except Exception as e:
+            set_expr = parse_set_expression(node.child.next, scopes)
+            if set_expr.success:
+                return ParseResult.success_result(SetGuard(arguments, set_expr.get_value()))
+            else:
                 return ParseResult.error_result(ParseError(
                     ParseErrorType.INVALID_VALUE,
-                    f"Failed to parse set expression in SetGuard: {e}",
+                    f"Failed to parse set expression in SetGuard: {set_expr.get_error()}",
                     node=node.child.next
                 ))
         
@@ -237,11 +226,7 @@ def parse_set_comprehension(node: ASTNode, scopes: ScopeHandler) -> ParseResult[
     
     try:
         # Extract member names from the left side of IN
-        member_names_result = parse_argument_vector(arguments_in_domain.child)
-        if not member_names_result.success:
-            return ParseResult.error_result(member_names_result.get_error())
-        
-        member_names = member_names_result.get_value()
+        member_names = parse_argument_vector(arguments_in_domain.child)
         
         # Parse domain expression from the right side of IN
         domain_result = parse_domain_expression(arguments_in_domain.child.next, scopes)
@@ -496,18 +481,6 @@ def _parse_multi_basis_vector_space(node: ASTNode) -> ParseResult[VectorSpace]:
             node=node
         ))
 
-def parse_composition(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
-    """Parse a composition by delegating to parse_set_expression"""
-    try:
-        result = parse_set_expression(node, scopes)
-        return ParseResult.success_result(result)
-    except Exception as e:
-        return ParseResult.error_result(ParseError(
-            ParseErrorType.INVALID_VALUE,
-            f"Failed to parse composition: {e}",
-            node=node
-        ))
-
 class PredicateParser:
     """Centralized predicate parser that tries parsers in order"""
     
@@ -517,10 +490,10 @@ class PredicateParser:
             ("vector_space", parse_vector_space),
             ("domain", parse_domain),
             ("set_comprehension", parse_set_comprehension),
-            ("composition", parse_composition)
+            ("composition", parse_set_expression)
         ]
     
-    def parse(self, node: ASTNode, scopes: ScopeHandler) -> ParseResult:
+    def parse(self, node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
         """Try parsers in order until one succeeds"""
         errors = []
         
@@ -578,13 +551,13 @@ class PredicateParser:
             node=most_specific_node or node
         ))
 
-def process_predicate(node: ASTNode, scopes: ScopeHandler):
+def process_predicate(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
     """Main predicate processing function"""
     if error := safe_assert_node_type(node, NodeType.PREDICATE):
-        raise ValueError(f"Expected PREDICATE node: {error.message}")
+        return ParseResult.error_result(ParseError(ParseErrorType.WRONG_CHILD_TYPE, error.message, node))
     
     if not node.child:
-        raise ValueError("Predicate node must have a child")
+        return ParseResult.error_result(ParseError(ParseErrorType.STRUCTURAL_ERROR, "Predicate node must have a child", node))
     
     has_context = node.child.type == NodeType.PREDICATE_CONTEXT
     if has_context:
@@ -593,7 +566,8 @@ def process_predicate(node: ASTNode, scopes: ScopeHandler):
         
         # After processing context, the actual predicate content is the next sibling
         if not node.child.next:
-            raise ValueError("Predicate with context must have content after the context")
+            return ParseResult.error_result(ParseError(ParseErrorType.STRUCTURAL_ERROR, 
+                                                       "Predicate node must have content after the context", node))
         predicate_content = node.child.next
     else:
         predicate_content = node.child
@@ -604,12 +578,7 @@ def process_predicate(node: ASTNode, scopes: ScopeHandler):
         
         # Pass the content node directly to the parser
         result = parser.parse(predicate_content, scopes)
-        
-        if not result.success:
-            # node.print_tree()
-            raise ValueError(f"Failed to parse predicate: {result.get_error().message}")
-        
-        return result.get_value()
+        return result
         
     finally:
         if has_context:
@@ -634,7 +603,7 @@ def flatten_plus_nodes(node: ASTNode) -> List[ASTNode]:
     traverse(node)
     return result
 
-def parse_scaling(node: ASTNode, scopes: ScopeHandler) -> LinearScale:
+def parse_scaling(node: ASTNode, scopes: ScopeHandler) -> ParseResult[LinearScale]:
     if error := safe_assert_node_type(node, NodeType.MUL):
         raise AssertionError(error.message)
     
@@ -642,16 +611,14 @@ def parse_scaling(node: ASTNode, scopes: ScopeHandler) -> LinearScale:
     for scalar_idx, set_idx in [(0, 1), (1, 0)]:
         scalar_result = parse_scalar(node.children[scalar_idx])
         if scalar_result.success:
-            assert scalar_result.value
-            try:
-                base_set = parse_set_expression(node.children[set_idx], scopes)
-                return LinearScale.from_scalar(scalar_result.value, base_set)
-            except (ValueError, AssertionError):
-                continue
-    
-    raise AssertionError("Could not be parsed as scale")
+            base_set = parse_set_expression(node.children[set_idx], scopes)
+            if base_set.success:
+                return ParseResult.success_result(
+                    LinearScale.from_scalar(scalar_result.get_value(), base_set.get_value()))
+    return ParseResult.error_result(ParseError(ParseErrorType.STRUCTURAL_ERROR, "Could not be parsed as scale"))
 
-def parse_shift(node: ASTNode, scopes: ScopeHandler) -> Shift:
+
+def parse_shift(node: ASTNode, scopes: ScopeHandler) -> ParseResult[Shift]:
     if error := safe_assert_node_type(node, NodeType.PLUS):
         raise ValueError(error.message)
     
@@ -659,63 +626,55 @@ def parse_shift(node: ASTNode, scopes: ScopeHandler) -> Shift:
     for vector_idx, set_idx in [(0, 1), (1, 0)]:
         vector_result = parse_vector(node.children[vector_idx])
         if vector_result.success:
-            assert vector_result.value
-            try:
-                base_set = parse_set_expression(node.children[set_idx], scopes)
-                return Shift(vector_result.value, base_set)
-            except (ValueError, AssertionError):
-                continue
+            base_set = parse_set_expression(node.children[set_idx], scopes)
+            if base_set.success:
+                return ParseResult.success_result(Shift(vector_result.get_value(), base_set.get_value()))
     
-    raise ValueError("Could not be parsed as shift")
+    return ParseResult.error_result(ParseError(ParseErrorType.STRUCTURAL_ERROR, "Could not be parsed as shift"))
 
-def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> SymbolicSet:
+def parse_set_expression(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
     # Base Cases
     match node.type:
         case NodeType.IDENTIFIER: 
             ident_node = scopes.lookup_by_name(node.value)
             assert isinstance(ident_node, IRNode)
-            return Identifier(node.value, ident_node.id, ident_node.dimension)
+            return ParseResult.success_result(Identifier(node.value, ident_node.id, ident_node.dimension))
 
         case NodeType.INTEGER: 
-            scalar_result = parse_scalar(node)
-            if scalar_result.success:
-                return scalar_result.get_value()
-            raise ValueError(f"Failed to parse integer as scalar: {scalar_result.get_error().message}")
+            return parse_scalar(node) #type: ignore
         case NodeType.PAREN: 
-            vector_result = parse_vector(node)
-            if vector_result.success:
-                return vector_result.get_value()
-            raise ValueError(f"Failed to parse parentheses as vector: {vector_result.get_error().message}")
+            return parse_vector(node) #type: ignore
 
     operands = [parse_set_expression(child, scopes) for child in node.children]
+    operands = [it.get_value() for it in operands]
     
     match node.type:
-        case NodeType.UNION: return UnionSet(tuple(operands))
-        case NodeType.INTERSECTION: return IntersectionSet(tuple(operands))
+        case NodeType.UNION: return ParseResult.success_result(UnionSet(tuple(operands)))
+        case NodeType.INTERSECTION: return ParseResult.success_result(IntersectionSet(tuple(operands)))
         case NodeType.DIFFERENCE:
             assert len(operands) == 2, f"Can only build a difference of two sets got {len(operands)}"
-            return make_difference(operands[0], operands[1])
+            return ParseResult.success_result(make_difference(operands[0], operands[1]))
         case NodeType.COMPLEMENT: 
             assert len(operands) == 1, f"Can only build the complement of one set got {len(operands)}"
-            return ComplementSet(operands[0])
+            return ParseResult.success_result(ComplementSet(operands[0]))
         case NodeType.XOR:
             assert len(operands) == 2, f"Can only build a XOR of two sets got {len(operands)}"
             minuend = UnionSet(tuple(operands))
             subtrahend = IntersectionSet(tuple(operands))
-            return make_difference(minuend, subtrahend)
+            return ParseResult.success_result(make_difference(minuend, subtrahend))
         case NodeType.CARTESIAN_PRODUCT: pass
 
     match node.type:
-        case NodeType.PLUS: return parse_shift(node, scopes)
+        case NodeType.PLUS: return parse_shift(node, scopes) #type: ignore
         case NodeType.MINUS: pass
-        case NodeType.MUL: return parse_scaling(node, scopes)
+        case NodeType.MUL: return parse_scaling(node, scopes) #type: ignore
         case NodeType.DIV: pass
         case NodeType.MOD: pass
         case NodeType.POWER: pass
 
     raise ValueError(f"The operand {node.type} is not implemented as set expression")
 
-def process_definition(node: ASTNode, scopes: ScopeHandler):
+def process_definition(node: ASTNode, scopes: ScopeHandler) -> None:
     if error := safe_assert_node_type(node, NodeType.DEFINITION):
         raise ValueError(error.message)
     
@@ -724,9 +683,9 @@ def process_definition(node: ASTNode, scopes: ScopeHandler):
     
     ident = node.child.value
     value = process_predicate(node.child.next, scopes)
-    scopes.add_definition(ident, value)
+    scopes.add_definition(ident, value.get_value())
 
-def process_predicate_context(node: ASTNode, scopes: ScopeHandler):
+def process_predicate_context(node: ASTNode, scopes: ScopeHandler) -> None:
     if error := safe_assert_node_type(node, NodeType.PREDICATE_CONTEXT):
         raise ValueError(error.message)
     
@@ -747,4 +706,4 @@ def convert(ast: ASTNode):
     
     scope_handler = ScopeHandler()
     result = process_predicate(ast, scope_handler)
-    return result, scope_handler
+    return result.get_value(), scope_handler
