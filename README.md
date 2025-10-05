@@ -1,10 +1,10 @@
 # Alchemist
 
-**Alchemist** is a transpiler that converts files written in the .ams](https://tapas.labri.fr/wp/?page_id=17) language into **SMT-LIB v2** format. It is designed to translate outputs from the [FASTer](https://tapas.labri.fr/wp/?page_id=23) tool, enabling automated verification of program termination using Ramsey-based techniques via [this tool](https://github.com/DarkVanityOfLight/RamseyLinearArithmetics).
+**Alchemist** is a transpiler that converts files written in the [Armoise](https://tapas.labri.fr/wp/?page_id=17) language into **SMT-LIB v2** format. It is designed to translate outputs from the [FASTer](https://tapas.labri.fr/wp/?page_id=23) tool, enabling automated verification of program termination using Ramsey-based techniques via [this tool](https://github.com/DarkVanityOfLight/RamseyLinearArithmetics).
 
 ## Features
 
-* Converts.ams specifications to SMT-LIB v2.
+* Converts Armoise specifications to SMT-LIB v2.
 * Works seamlessly with FASTer outputs.
 * Supports termination proofs using infinite Ramsey clique detection.
 * Command-line interface with flexible options for output, verbosity, and timing.
@@ -58,6 +58,6 @@ python alchemist.py input.ams -t
 
 ## References
 
-* .ams Language](https://tapas.labri.fr/wp/?page_id=17)
+* [Armoise Language](https://tapas.labri.fr/wp/?page_id=17)
 * [FASTer Tool](https://tapas.labri.fr/wp/?page_id=23)
 * [Ramsey Linear Arithmetics](https://github.com/DarkVanityOfLight/RamseyLinearArithmetics)
