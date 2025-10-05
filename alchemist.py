@@ -2,6 +2,7 @@ import sys
 import argparse
 import logging
 from typing import cast, Optional
+import time
 
 from arm_ast import ASTNode
 from irparsers import convert
@@ -40,20 +41,15 @@ def main():
     parser_cli = argparse.ArgumentParser(
         description="Alchemist: Parse, optimize, and emit SMT-LIB2 from Armoise source files."
     )
-    parser_cli.add_argument(
-        "files", nargs='+', help="One or more source files to compile"
-    )
-    parser_cli.add_argument(
-        "-r", "--relation-name", default="R", help="Set the output relation name default is R"
-    )
-    parser_cli.add_argument(
-        "-o", "--output", help="Write output to file (defaults to STDOUT)"
-    )
-    parser_cli.add_argument(
-        "-v", "--verbose", action='store_true', help="Enable verbose logging"
-    )
+    parser_cli.add_argument("files", nargs='+', help="One or more source files to compile")
+    parser_cli.add_argument("-r", "--relation-name", default="R", help="Set the output relation name default is R")
+    parser_cli.add_argument("-o", "--output", help="Write output to file (defaults to STDOUT)")
+    parser_cli.add_argument("-v", "--verbose", action='store_true', help="Enable verbose logging")
+    parser_cli.add_argument("-t", "--time", action='store_true', help="Measure and report total compilation time")
 
     args = parser_cli.parse_args()
+
+    start_time = time.perf_counter() if args.time else None
 
     # Configure logging
     level = logging.DEBUG if args.verbose else logging.INFO
@@ -61,7 +57,6 @@ def main():
 
     combined_buffer = []
     for fname in args.files:
-        # logging.info("Processing file: %s", fname)
         ast: Optional[ASTNode] = cast(Optional[ASTNode], parse_file(fname))
         if ast is None:
             logging.error("Skipping due to parse errors: %s", fname)
@@ -88,6 +83,10 @@ def main():
             sys.exit(2)
     else:
         print(final_output)
+
+    if args.time:
+        elapsed = time.perf_counter() - start_time
+        print(f"[time] {elapsed:.3f}s", file=sys.stderr)
 
 
 if __name__ == "__main__":
