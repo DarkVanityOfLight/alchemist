@@ -1,0 +1,10 @@
+let
+  int3 := (int, int, int);
+  nat3 := (nat, nat, nat);
+  C := {(x_src, x_dst, state) in int3 | x_src > x_dst};
+  B := {(x_src, x_dst, state) in int3 | (x_src, x_dst, state) in C};
+  A0 := {(x_src, x_dst, state) in int3 | (x_src, x_dst, state) in B};
+  A1 := {(x_src, x_dst, state) in int3 | (x_src, x_dst, state) in B};
+  R := {(x_src, x_dst, state) in A0 | (x_src, x_dst, state) in A1};
+in
+  { (x_src, x_dst, state) in nat3 | (x_src, x_dst, state) in R };

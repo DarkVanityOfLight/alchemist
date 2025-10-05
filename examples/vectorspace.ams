@@ -1,0 +1,5 @@
+let
+  G0 := int * (2, 0, 0) + int * (0, 3, 0);
+  nat3 := (nat, nat, nat);
+in
+  { (a, b, c) in nat3 | (a, b, c) in G0 };
