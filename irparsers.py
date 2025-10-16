@@ -113,7 +113,7 @@ def parse_vector(node: ASTNode) -> ParseResult[Vector]:
         return ParseResult.error_result(error)
     
     # Check all children are integers
-    if not all(child.type == NodeType.INTEGER for child in node.children):
+    if not all(child.type == NodeType.INTEGER or child.type == NodeType.NEG for child in node.children):
         return ParseResult.error_result(ParseError(
             ParseErrorType.WRONG_CHILD_TYPE,
             "All children must be integers for vector parsing",
@@ -121,7 +121,12 @@ def parse_vector(node: ASTNode) -> ParseResult[Vector]:
         ))
     
     try:
-        ints = [child.value for child in node.children]
+        ints = []
+        for child in node.children:
+            if child.type == NodeType.INTEGER:
+                ints.append(child.value)
+            elif child.type == NodeType.NEG:
+                ints.append(-1*child.children[0].value)
         return ParseResult.success_result(Vector(tuple(ints)))
     except Exception as e:
         return ParseResult.error_result(ParseError(
@@ -646,15 +651,25 @@ def parse_shift(node: ASTNode, scopes: ScopeHandler) -> ParseResult[Shift]:
     if error := safe_assert_node_type(node, NodeType.PLUS):
         raise ValueError(error.message)
     
+    errors = []
+    
     # Try both operand orders
     for vector_idx, set_idx in [(0, 1), (1, 0)]:
         vector_result = parse_vector(node.children[vector_idx])
-        if vector_result.success:
-            base_set = parse_set_expression(node.children[set_idx], scopes)
-            if base_set.success:
-                return ParseResult.success_result(Shift(vector_result.get_value(), base_set.get_value()))
+        if not vector_result.success:
+            errors.append(f"Attempt with child {vector_idx} as vector failed: {vector_result.get_error().message}")
+            continue
+
+        base_set = parse_set_expression(node.children[set_idx], scopes)
+        if not base_set.success:
+            errors.append(f"Attempt with child {set_idx} as set failed: {base_set.get_error().message}")
+            continue
+            
+        return ParseResult.success_result(Shift(vector_result.get_value(), base_set.get_value()))
     
-    return ParseResult.error_result(ParseError(ParseErrorType.STRUCTURAL_ERROR, "Could not be parsed as shift"))
+    # If both orders failed, return a more informative error
+    detailed_error_message = "Could not be parsed as shift. Reasons: " + "; ".join(errors)
+    return ParseResult.error_result(ParseError(ParseErrorType.STRUCTURAL_ERROR, detailed_error_message))
 
 def parse_parenthesized(node: ASTNode, scopes: ScopeHandler) -> ParseResult[SymbolicSet]:
     if error := safe_assert_node_type(node, NodeType.PAREN):
