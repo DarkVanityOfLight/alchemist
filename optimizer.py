@@ -299,10 +299,18 @@ class LinearTransform(SymbolicSet):
         n = len(args)
         return cls(args, (1,) * n, (0,) * n, child)
 
+    def with_args_from(self, args: Tuple[Argument, ...], child: IRNode) -> LinearTransform:
+        """
+        Create a new LinearTransform that preserves the scales/shifts
+        from `base` but replaces the arguments and child.
+        """
+        return LinearTransform(args, self.scales, self.shifts, child)
+
     def apply_scale(self, factor: Tuple[int, ...]) -> LinearTransform:
         new_scales = tuple(s * f for s, f in zip(self.scales, factor))
         new_shifts = tuple(sh * f for sh, f in zip(self.shifts, factor))
-        return LinearTransform(self.arguments, new_scales, new_shifts, self.child)
+        ltf = LinearTransform(self.arguments, new_scales, new_shifts, self.child)
+        return ltf
 
     def apply_shift(self, delta: Tuple[int, ...]) -> LinearTransform:
         new_shifts = tuple(sh + d for sh, d in zip(self.shifts, delta))
@@ -359,9 +367,10 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
         new_ltf = ltf.apply_scale(child.factor.comps)
         existing_scales = collect_existing_scales(child)
         all_scales = existing_scales + [child.factor.comps]
+        print(new_ltf.shifts)
         return push_linear_transform(
             replace(new_ltf, child=
-                    Annotated(child.scaled_set, {"mod_guard": all_scales})))
+                    Annotated(child.scaled_set, {"mod_guard": (all_scales, ltf.shifts)})))
     if isinstance(child, Shift):
         new_ltf = ltf.apply_shift(child.shift.comps)
         return push_linear_transform(replace(new_ltf, child=child.shifted_set))
@@ -374,20 +383,22 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
         if isinstance(child, UnionSpace):
             return UnionSpace(parts=tuple(transformed)) #type: ignore
         return IntersectionSet(parts=tuple(transformed)) #type: ignore 
+
     if isinstance(child, ComplementSet):
         return ComplementSet(
-            complemented_set=push_linear_transform(LinearTransform.identity(ltf.arguments, child.complemented_set)) #type: ignore
+            complemented_set=push_linear_transform(ltf.with_args_from(ltf.arguments, child.complemented_set)) #type: ignore
         )
     if isinstance(child, SetComprehension):
-        return SetComprehension(
+        s= SetComprehension(
             child.arguments,
-            push_linear_transform(LinearTransform.identity(ltf.arguments, child.domain)), #type: ignore
-            push_linear_transform(LinearTransform.identity(ltf.arguments, child.guard)) #type: ignore
+            push_linear_transform(ltf.with_args_from(ltf.arguments, child.domain)), #type: ignore
+            push_linear_transform(ltf.with_args_from(ltf.arguments, child.guard)) #type: ignore
         )
+        return s
     if isinstance(child, SetGuard) and child.set_expr is not None:
         return SetGuard(
             arguments=child.arguments,
-            set_expr=push_linear_transform(LinearTransform.identity(ltf.arguments, child.set_expr)) #type: ignore
+            set_expr=push_linear_transform(ltf.with_args_from(ltf.arguments, child.set_expr)) #type: ignore
         )
     if isinstance(child, Vector):
         return Vector(tuple([ltf.scales[i] * child.comps[i] + ltf.shifts[i] for i in range(child.dimension)]))

@@ -149,11 +149,12 @@ def emit_annotations(node: IRNode, args: Tuple[str, ...]) -> List[str]:
     if is_annotated(node):
         ann = get_annotations(node)
         if 'mod_guard' in ann:
-            mod_guards: List[Tuple[int, ...]] = ann['mod_guard']
+            mod_guards: List[Tuple[int, ...]] = ann['mod_guard'][0]
+            shifts = ann['mod_guard'][1]
             for scales in mod_guards:
                 for i, scale in enumerate(scales):
                     if i < len(args) and scale > 1:
-                        guards.append(f"(= (mod {args[i]} {scale}) 0)")
+                        guards.append(f"(= (mod {args[i]} {scale}) {shifts[i]%scale})")
     return guards
 
 
@@ -268,16 +269,17 @@ def emit_vector_space_transform(node: LinearTransform, args: Tuple[str, ...]) ->
         shift = node.shifts[i]
         scale = basis_scales[i] * node.scales[i]
 
-        if i in unconstrained_dims or scale == 1:
+        if i in unconstrained_dims:
             conditions.append(f"(= {name} {shift})")
-        else:
+        elif scale != 1:
             if shift == 0:
                 conditions.append(f"(= (mod {name} {scale}) 0)")
             else:
                 conditions.append(f"(= (mod (- {name} {shift}) {scale}) 0)")
 
     conditions.extend(emit_annotations(node.child, args))
-    return f"(and {' '.join(conditions)})"
+    base_set_constraints = emit_product_domain(vector_space.domain, args)
+    return f"(and {' '.join(conditions)} {base_set_constraints})"
 
 
 def emit_guard_condition(guard: SimpleGuard, lt: LinearTransform | None, args: Tuple[str, ...]) -> str:
