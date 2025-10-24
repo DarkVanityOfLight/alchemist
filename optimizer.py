@@ -367,7 +367,6 @@ def push_linear_transform(ltf: LinearTransform) -> IRNode:
         new_ltf = ltf.apply_scale(child.factor.comps)
         existing_scales = collect_existing_scales(child)
         all_scales = existing_scales + [child.factor.comps]
-        print(new_ltf.shifts)
         return push_linear_transform(
             replace(new_ltf, child=
                     Annotated(child.scaled_set, {"mod_guard": (all_scales, ltf.shifts)})))
