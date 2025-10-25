@@ -1,16 +1,19 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
+from typing import Dict
 import typing
 
 if typing.TYPE_CHECKING:
     from expressions import IRNode
 
 class ScopeHandler:
-    """Handles nested scopes and symbol lookup"""
+    """
+    Handles nested scopes while parsing, globalizes the node identifiers and 
+    keeps track of the globalized id -> node mapping
+    """
 
     def __init__(self) -> None:
-        self.scopes = [{}]
-        self.parsed_ids : Dict[int, IRNode]= {}
+        self.scopes = [{}] # Local definitions
+        self.parsed_ids : Dict[int, IRNode]= {} # Globalized identifiers
 
     def enter_scope(self):
         """Push a new scope when entering let-block"""
